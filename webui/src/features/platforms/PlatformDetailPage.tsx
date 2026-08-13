@@ -46,6 +46,7 @@ import {
 } from "./formModel";
 import { PlatformAccessPanel } from "./PlatformAccessPanel";
 import { PlatformMonitorPanel } from "./PlatformMonitorPanel";
+import { ProbeOverrideFields } from "./ProbeOverrideFields";
 import type { PlatformLease } from "./types";
 
 type PlatformDetailTab = "monitor" | "access" | "config" | "ops";
@@ -602,6 +603,8 @@ export function PlatformDetailPage() {
                       <Switch id="detail-edit-passive-circuit-breaker" {...editForm.register("passive_circuit_breaker_disabled")} />
                     </div>
                   </div>
+
+                  <ProbeOverrideFields idPrefix="detail-edit" form={editForm} t={t} />
 
                   <div className="field-group">
                     <label className="field-label" htmlFor="detail-edit-empty-account-behavior">

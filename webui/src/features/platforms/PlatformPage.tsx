@@ -18,6 +18,7 @@ import { useI18n } from "../../i18n";
 import { formatApiErrorMessage } from "../../lib/error-message";
 import { formatGoDuration, formatRelativeTime } from "../../lib/time";
 import { createPlatform, listPlatforms } from "./api";
+import { ProbeOverrideFields } from "./ProbeOverrideFields";
 import {
   allocationPolicies,
   allocationPolicyLabel,
@@ -306,6 +307,8 @@ export function PlatformPage() {
                   <Switch id="create-passive-circuit-breaker" {...createForm.register("passive_circuit_breaker_disabled")} />
                 </div>
               </div>
+
+              <ProbeOverrideFields idPrefix="create" form={createForm} t={t} />
 
               <div className="field-group">
                 <label className="field-label" htmlFor="create-empty-account-behavior">

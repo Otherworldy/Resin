@@ -1,9 +1,11 @@
 package service
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -30,9 +32,10 @@ type PlatformResponse struct {
 	ReverseProxyMissAction           string   `json:"reverse_proxy_miss_action"`
 	ReverseProxyEmptyAccountBehavior string   `json:"reverse_proxy_empty_account_behavior"`
 	ReverseProxyFixedAccountHeader   string   `json:"reverse_proxy_fixed_account_header"`
-	AllocationPolicy                 string   `json:"allocation_policy"`
-	PassiveCircuitBreakerDisabled    bool     `json:"passive_circuit_breaker_disabled"`
-	UpdatedAt                        string   `json:"updated_at"`
+	AllocationPolicy                 string                        `json:"allocation_policy"`
+	PassiveCircuitBreakerDisabled    bool                          `json:"passive_circuit_breaker_disabled"`
+	ProbeOverride                    *model.PlatformProbeOverride  `json:"probe_override,omitempty"`
+	UpdatedAt                        string                        `json:"updated_at"`
 }
 
 func platformToResponse(p model.Platform) PlatformResponse {
@@ -50,8 +53,79 @@ func platformToResponse(p model.Platform) PlatformResponse {
 		ReverseProxyFixedAccountHeader:   fixedHeader,
 		AllocationPolicy:                 p.AllocationPolicy,
 		PassiveCircuitBreakerDisabled:    p.PassiveCircuitBreakerDisabled,
+		ProbeOverride:                    cloneProbeOverride(p.ProbeOverride),
 		UpdatedAt:                        time.Unix(0, p.UpdatedAtNs).UTC().Format(time.RFC3339Nano),
 	}
+}
+
+// validatePlatformProbeOverride validates user-provided probe override values.
+func validatePlatformProbeOverride(ov *model.PlatformProbeOverride) *ServiceError {
+	if ov == nil {
+		return nil
+	}
+	if ov.LatencyProbeIntervalNs < 0 || ov.EgressProbeIntervalNs < 0 {
+		return invalidArg("probe_override: interval values must be >= 0")
+	}
+	if ov.LatencyTestURL != "" {
+		u, err := url.Parse(ov.LatencyTestURL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return invalidArg("probe_override.latency_test_url: must be an http(s) URL")
+		}
+	}
+	return nil
+}
+
+// normalizeProbeOverride returns nil when the override is effectively empty,
+// so an all-zero object clears the platform override (back to global config).
+func normalizeProbeOverride(ov *model.PlatformProbeOverride) *model.PlatformProbeOverride {
+	if ov == nil {
+		return nil
+	}
+	if !ov.Disabled && ov.LatencyProbeIntervalNs == 0 && ov.EgressProbeIntervalNs == 0 && ov.LatencyTestURL == "" {
+		return nil
+	}
+	return cloneProbeOverride(ov)
+}
+
+// mergeProbeOverridePatch overlays a partial probe_override object onto the
+// current override (nil current = zero-value base). An empty object clears the
+// override entirely, falling back to global probe configuration.
+func mergeProbeOverridePatch(current *model.PlatformProbeOverride, raw json.RawMessage) (*model.PlatformProbeOverride, *ServiceError) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return nil, invalidArg("probe_override: invalid JSON: " + err.Error())
+	}
+	if len(fields) == 0 {
+		return nil, nil
+	}
+	var patch model.PlatformProbeOverride
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&patch); err != nil {
+		return nil, invalidArg("probe_override: " + err.Error())
+	}
+	merged := cloneProbeOverride(current)
+	if merged == nil {
+		merged = &model.PlatformProbeOverride{}
+	}
+	// Overlay only the fields present in the patch. A boolean false is a
+	// meaningful value for "disabled", so field presence must drive the merge.
+	if _, ok := fields["disabled"]; ok {
+		merged.Disabled = patch.Disabled
+	}
+	if _, ok := fields["latency_probe_interval_ns"]; ok {
+		merged.LatencyProbeIntervalNs = patch.LatencyProbeIntervalNs
+	}
+	if _, ok := fields["egress_probe_interval_ns"]; ok {
+		merged.EgressProbeIntervalNs = patch.EgressProbeIntervalNs
+	}
+	if _, ok := fields["latency_test_url"]; ok {
+		merged.LatencyTestURL = patch.LatencyTestURL
+	}
+	if err := validatePlatformProbeOverride(merged); err != nil {
+		return nil, err
+	}
+	return merged, nil
 }
 
 func (s *ControlPlaneService) withRoutableNodeCount(resp PlatformResponse) PlatformResponse {
@@ -76,6 +150,7 @@ type platformConfig struct {
 	ReverseProxyFixedAccountHeader   string
 	AllocationPolicy                 string
 	PassiveCircuitBreakerDisabled    bool
+	ProbeOverride                    *model.PlatformProbeOverride
 }
 
 func normalizePlatformMissAction(raw string) string {
@@ -121,7 +196,16 @@ func platformConfigFromModel(mp model.Platform) platformConfig {
 		ReverseProxyFixedAccountHeader:   normalizeHeaderFieldName(mp.ReverseProxyFixedAccountHeader),
 		AllocationPolicy:                 mp.AllocationPolicy,
 		PassiveCircuitBreakerDisabled:    mp.PassiveCircuitBreakerDisabled,
+		ProbeOverride:                    cloneProbeOverride(mp.ProbeOverride),
 	}
+}
+
+func cloneProbeOverride(ov *model.PlatformProbeOverride) *model.PlatformProbeOverride {
+	if ov == nil {
+		return nil
+	}
+	cp := *ov
+	return &cp
 }
 
 func (cfg platformConfig) toModel(id string, updatedAtNs int64) model.Platform {
@@ -136,6 +220,7 @@ func (cfg platformConfig) toModel(id string, updatedAtNs int64) model.Platform {
 		ReverseProxyFixedAccountHeader:   cfg.ReverseProxyFixedAccountHeader,
 		AllocationPolicy:                 cfg.AllocationPolicy,
 		PassiveCircuitBreakerDisabled:    cfg.PassiveCircuitBreakerDisabled,
+		ProbeOverride:                    cloneProbeOverride(cfg.ProbeOverride),
 		UpdatedAtNs:                      updatedAtNs,
 	}
 }
@@ -156,6 +241,7 @@ func (cfg platformConfig) toRuntime(id string) (*platform.Platform, error) {
 		cfg.ReverseProxyFixedAccountHeader,
 		cfg.AllocationPolicy,
 		cfg.PassiveCircuitBreakerDisabled,
+		cloneProbeOverride(cfg.ProbeOverride),
 	), nil
 }
 
@@ -334,6 +420,7 @@ type CreatePlatformRequest struct {
 	ReverseProxyFixedAccountHeader   *string  `json:"reverse_proxy_fixed_account_header"`
 	AllocationPolicy                 *string  `json:"allocation_policy"`
 	PassiveCircuitBreakerDisabled    *bool    `json:"passive_circuit_breaker_disabled"`
+	ProbeOverride                    *model.PlatformProbeOverride `json:"probe_override"`
 }
 
 // CreatePlatform creates a new platform.
@@ -390,6 +477,12 @@ func (s *ControlPlaneService) CreatePlatform(req CreatePlatformRequest) (*Platfo
 	}
 	if req.PassiveCircuitBreakerDisabled != nil {
 		cfg.PassiveCircuitBreakerDisabled = *req.PassiveCircuitBreakerDisabled
+	}
+	if req.ProbeOverride != nil {
+		if err := validatePlatformProbeOverride(req.ProbeOverride); err != nil {
+			return nil, err
+		}
+		cfg.ProbeOverride = normalizeProbeOverride(req.ProbeOverride)
 	}
 	if err := validatePlatformConfig(&cfg, true); err != nil {
 		return nil, err
@@ -507,6 +600,15 @@ func (s *ControlPlaneService) UpdatePlatform(id string, patchJSON json.RawMessag
 		return nil, err
 	} else if ok {
 		cfg.PassiveCircuitBreakerDisabled = disabled
+	}
+	if raw, ok, err := patch.optionalRawMessage("probe_override"); err != nil {
+		return nil, err
+	} else if ok {
+		merged, err := mergeProbeOverridePatch(cfg.ProbeOverride, raw)
+		if err != nil {
+			return nil, err
+		}
+		cfg.ProbeOverride = normalizeProbeOverride(merged)
 	}
 	if err := validatePlatformConfig(&cfg, regionFiltersPatched); err != nil {
 		return nil, err

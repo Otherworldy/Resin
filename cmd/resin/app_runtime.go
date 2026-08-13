@@ -383,6 +383,7 @@ func (a *resinApp) buildNetworkServers(engine *state.StateEngine) error {
 		GeoIP:          a.geoSvc,
 		MatcherRuntime: a.accountMatcher,
 	}
+	a.topoRuntime.probeMgr.SetResolvePlatformProbe(cpService.ResolvePlatformProbe)
 
 	apiSrv := api.NewServerWithAddress(
 		a.envCfg.ListenAddress,

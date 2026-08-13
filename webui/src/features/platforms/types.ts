@@ -2,6 +2,13 @@ export type PlatformMissAction = "TREAT_AS_EMPTY" | "REJECT";
 export type PlatformEmptyAccountBehavior = "RANDOM" | "FIXED_HEADER" | "ACCOUNT_HEADER_RULE";
 export type PlatformAllocationPolicy = "BALANCED" | "PREFER_LOW_LATENCY" | "PREFER_IDLE_IP";
 
+export type PlatformProbeOverride = {
+  disabled?: boolean;
+  latency_probe_interval_ns?: number;
+  egress_probe_interval_ns?: number;
+  latency_test_url?: string;
+};
+
 export type Platform = {
   id: string;
   name: string;
@@ -14,6 +21,7 @@ export type Platform = {
   reverse_proxy_fixed_account_header: string;
   allocation_policy: PlatformAllocationPolicy;
   passive_circuit_breaker_disabled: boolean;
+  probe_override?: PlatformProbeOverride | null;
   updated_at: string;
 };
 
@@ -34,6 +42,7 @@ export type PlatformCreateInput = {
   reverse_proxy_fixed_account_header?: string;
   allocation_policy?: PlatformAllocationPolicy;
   passive_circuit_breaker_disabled?: boolean;
+  probe_override?: PlatformProbeOverride;
 };
 
 export type PlatformUpdateInput = {
@@ -46,6 +55,7 @@ export type PlatformUpdateInput = {
   reverse_proxy_fixed_account_header?: string;
   allocation_policy?: PlatformAllocationPolicy;
   passive_circuit_breaker_disabled?: boolean;
+  probe_override?: PlatformProbeOverride;
 };
 
 export type PlatformLease = {

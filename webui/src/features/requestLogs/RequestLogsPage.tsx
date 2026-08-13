@@ -39,9 +39,23 @@ type FilterDraft = {
 
 type DebouncedTextFilters = Pick<FilterDraft, "platform_name" | "account" | "target_host" | "egress_ip" | "http_status">;
 
+// defaultLogsRange returns a datetime-local range covering the last 24h.
+// Bounding the default query to a time window keeps the fuzzy text search on
+// the ts_ns index instead of scanning the whole rolling DB.
+function defaultLogsRange(): { from: string; to: string } {
+  const to = new Date();
+  const from = new Date(to.getTime() - 24 * 60 * 60 * 1000);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const fmt = (d: Date) =>
+    `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return { from: fmt(from), to: fmt(to) };
+}
+
+const defaultRange = defaultLogsRange();
+
 const defaultFilters: FilterDraft = {
-  from_local: "",
-  to_local: "",
+  from_local: defaultRange.from,
+  to_local: defaultRange.to,
   platform_name: "",
   account: "",
   target_host: "",

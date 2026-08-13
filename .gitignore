@@ -1,5 +1,6 @@
 /resin
 .env
+/data
 sing-box-reference
 .agents
 .devcontainer

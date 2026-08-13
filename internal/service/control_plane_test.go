@@ -890,6 +890,7 @@ func TestDeletePlatform_DoesNotDecodeCorruptPersistedFiltersJSON(t *testing.T) {
 		"",
 		platformRow.AllocationPolicy,
 		true,
+		nil,
 	))
 
 	cp := &ControlPlaneService{
@@ -953,6 +954,7 @@ func TestResetPlatformToDefault_SupportsBuiltInDefaultPlatform(t *testing.T) {
 		"",
 		defaultRow.AllocationPolicy,
 		true,
+		nil,
 	))
 
 	cp := &ControlPlaneService{
@@ -1095,6 +1097,7 @@ func TestResetPlatformToDefault_DoesNotDecodeCorruptPersistedFiltersJSON(t *test
 		"",
 		platformRow.AllocationPolicy,
 		true,
+		nil,
 	))
 
 	cp := &ControlPlaneService{
@@ -1253,5 +1256,64 @@ func TestListAccountHeaderRules_FailsFastOnCorruptPersistedHeadersColumn(t *test
 	}
 	if serviceErr.Err == nil || !strings.Contains(serviceErr.Err.Error(), "decode account header rule") {
 		t.Fatalf("unexpected wrapped service error: %v", serviceErr.Err)
+	}
+}
+
+// TestResolvePlatformProbe verifies aggregation of platform-level probe
+// overrides across multiple platforms containing the same node.
+func TestResolvePlatformProbe(t *testing.T) {
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		GeoLookup:              func(netip.Addr) string { return "us" },
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+	})
+
+	hash := node.HashFromRawOptions([]byte(`{"type":"shared"}`))
+	pool.AddNodeFromSub(hash, []byte(`{"type":"shared"}`), "sub1")
+	entry, ok := pool.GetEntry(hash)
+	if !ok {
+		t.Fatal("entry not found")
+	}
+	ob := testutil.NewNoopOutbound()
+	entry.Outbound.Store(&ob)
+	egressIP := netip.MustParseAddr("203.0.113.9")
+	pool.UpdateNodeEgressIP(hash, &egressIP, nil)
+	pool.RecordResult(hash, true) // close the initial circuit-open state
+	probeLatency := 42 * time.Millisecond
+	pool.RecordLatency(hash, "example.com", &probeLatency)
+
+	platA := platform.NewConfiguredPlatform("p-a", "A", node.TagFilter{}, nil, 0, "", "RANDOM", "", "BALANCED", false, &model.PlatformProbeOverride{
+		Disabled:               true,
+		LatencyProbeIntervalNs: int64(time.Hour),
+	})
+	platB := platform.NewConfiguredPlatform("p-b", "B", node.TagFilter{}, nil, 0, "", "RANDOM", "", "BALANCED", false, &model.PlatformProbeOverride{
+		LatencyProbeIntervalNs: int64(30 * time.Minute),
+		LatencyTestURL:         "https://example.com/generate_204",
+	})
+	pool.RebuildPlatform(platA)
+	pool.RebuildPlatform(platB)
+	pool.RegisterPlatform(platA)
+	pool.RegisterPlatform(platB)
+
+	cp := &ControlPlaneService{Pool: pool}
+	got := cp.ResolvePlatformProbe(hash)
+	if got.Disabled {
+		t.Fatal("probing should stay enabled: platform B allows it")
+	}
+	if got.LatencyInterval != 30*time.Minute {
+		t.Fatalf("latency interval: got %v, want 30m (minimum across platforms)", got.LatencyInterval)
+	}
+	if got.TestURL != "https://example.com/generate_204" {
+		t.Fatalf("test url: got %q", got.TestURL)
+	}
+
+	// When every containing platform disables probing, the node is disabled.
+	platB2 := platform.NewConfiguredPlatform("p-b", "B", node.TagFilter{}, nil, 0, "", "RANDOM", "", "BALANCED", false, &model.PlatformProbeOverride{
+		Disabled: true,
+	})
+	pool.RebuildPlatform(platB2)
+	pool.ReplacePlatform(platB2)
+	if got := cp.ResolvePlatformProbe(hash); !got.Disabled {
+		t.Fatal("node should be probe-disabled when all containing platforms disable it")
 	}
 }

@@ -200,14 +200,59 @@ func HandleProbeEgress(cp *service.ControlPlaneService) http.HandlerFunc {
 }
 
 // HandleProbeLatency returns a handler for POST /api/v1/nodes/{hash}/actions/probe-latency.
+// Optional query param platform_id pins the probe to that platform's test URL.
 func HandleProbeLatency(cp *service.ControlPlaneService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		hash := PathParam(r, "hash")
-		result, err := cp.ProbeLatency(hash)
+		result, err := cp.ProbeLatency(hash, r.URL.Query().Get("platform_id"))
 		if err != nil {
 			writeServiceError(w, err)
 			return
 		}
 		WriteJSON(w, http.StatusOK, result)
+	}
+}
+
+// batchProbeRequest is the body for batch node probe endpoints.
+type batchProbeRequest struct {
+	Hashes     []string `json:"hashes"`
+	PlatformID string   `json:"platform_id,omitempty"`
+}
+
+type batchProbeResponse struct {
+	Items []service.NodeProbeItem `json:"items"`
+}
+
+// HandleBatchProbeLatency returns a handler for POST /api/v1/nodes/actions/probe-latency.
+func HandleBatchProbeLatency(cp *service.ControlPlaneService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req batchProbeRequest
+		if err := DecodeBody(r, &req); err != nil {
+			writeInvalidArgument(w, err.Error())
+			return
+		}
+		items, err := cp.BatchProbeLatency(req.Hashes, req.PlatformID)
+		if err != nil {
+			writeServiceError(w, err)
+			return
+		}
+		WriteJSON(w, http.StatusOK, batchProbeResponse{Items: items})
+	}
+}
+
+// HandleBatchProbeEgress returns a handler for POST /api/v1/nodes/actions/probe-egress.
+func HandleBatchProbeEgress(cp *service.ControlPlaneService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req batchProbeRequest
+		if err := DecodeBody(r, &req); err != nil {
+			writeInvalidArgument(w, err.Error())
+			return
+		}
+		items, err := cp.BatchProbeEgress(req.Hashes)
+		if err != nil {
+			writeServiceError(w, err)
+			return
+		}
+		WriteJSON(w, http.StatusOK, batchProbeResponse{Items: items})
 	}
 }

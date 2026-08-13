@@ -103,8 +103,33 @@ export async function probeEgress(hash: string): Promise<EgressProbeResult> {
   });
 }
 
-export async function probeLatency(hash: string): Promise<LatencyProbeResult> {
-  return apiRequest<LatencyProbeResult>(`${basePath}/${hash}/actions/probe-latency`, {
+export async function probeLatency(hash: string, platformId?: string): Promise<LatencyProbeResult> {
+  const query = platformId ? `?platform_id=${encodeURIComponent(platformId)}` : "";
+  return apiRequest<LatencyProbeResult>(`${basePath}/${hash}/actions/probe-latency${query}`, {
     method: "POST",
+  });
+}
+
+export type BatchProbeItem = {
+  hash: string;
+  error?: string;
+  result?: EgressProbeResult | LatencyProbeResult;
+};
+
+export type BatchProbeResponse = {
+  items: BatchProbeItem[];
+};
+
+export async function batchProbeEgress(hashes: string[]): Promise<BatchProbeResponse> {
+  return apiRequest<BatchProbeResponse>(`${basePath}/actions/probe-egress`, {
+    method: "POST",
+    body: { hashes },
+  });
+}
+
+export async function batchProbeLatency(hashes: string[], platformId?: string): Promise<BatchProbeResponse> {
+  return apiRequest<BatchProbeResponse>(`${basePath}/actions/probe-latency`, {
+    method: "POST",
+    body: { hashes, ...(platformId ? { platform_id: platformId } : {}) },
   });
 }

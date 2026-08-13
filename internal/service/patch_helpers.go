@@ -109,6 +109,18 @@ func (p mergePatch) optionalStringSlice(field string) ([]string, bool, *ServiceE
 	return value, true, nil
 }
 
+func (p mergePatch) optionalRawMessage(field string) (json.RawMessage, bool, *ServiceError) {
+	raw, ok := p[field]
+	if !ok {
+		return nil, false, nil
+	}
+	rawJSON, err := json.Marshal(raw)
+	if err != nil {
+		return nil, true, invalidArg(fmt.Sprintf("%s: invalid JSON value", field))
+	}
+	return rawJSON, true, nil
+}
+
 func (p mergePatch) optionalDurationString(field string) (time.Duration, bool, *ServiceError) {
 	raw, ok := p[field]
 	if !ok {

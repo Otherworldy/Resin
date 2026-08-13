@@ -1952,6 +1952,21 @@ a {
   padding: 14px;
 }
 
+.nodes-batch-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  border: 1px solid var(--accent-border, rgba(96, 165, 250, 0.35));
+  border-radius: var(--radius-md, 8px);
+  background: var(--accent-bg, rgba(96, 165, 250, 0.08));
+}
+
+.nodes-batch-bar .muted {
+  margin-right: auto;
+}
+
 .logs-table-card {
   padding: 14px;
 }

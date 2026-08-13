@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"sync"
 
+	"github.com/Resinat/Resin/internal/model"
 	"github.com/Resinat/Resin/internal/node"
 )
 
@@ -40,6 +41,7 @@ type Platform struct {
 	ReverseProxyFixedAccountHeaders  []string
 	AllocationPolicy                 AllocationPolicy
 	PassiveCircuitBreakerDisabled    bool
+	ProbeOverride                    *model.PlatformProbeOverride // nil = 全局探测配置
 
 	// Routable view & its lock.
 	// viewMu serializes both FullRebuild and NotifyDirty.

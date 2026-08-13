@@ -3,6 +3,15 @@ package model
 
 import "encoding/json"
 
+// PlatformProbeOverride overrides global probe settings for a single platform.
+// Zero/empty fields fall back to global probe configuration.
+type PlatformProbeOverride struct {
+	Disabled               bool   `json:"disabled"`
+	LatencyProbeIntervalNs int64  `json:"latency_probe_interval_ns"`
+	EgressProbeIntervalNs  int64  `json:"egress_probe_interval_ns"`
+	LatencyTestURL         string `json:"latency_test_url"`
+}
+
 // Platform represents a routing platform.
 type Platform struct {
 	ID                               string `json:"id"`
@@ -15,6 +24,7 @@ type Platform struct {
 	ReverseProxyFixedAccountHeader   string `json:"reverse_proxy_fixed_account_header"`
 	AllocationPolicy                 string `json:"allocation_policy"`
 	PassiveCircuitBreakerDisabled    bool   `json:"passive_circuit_breaker_disabled"`
+	ProbeOverride                    *PlatformProbeOverride `json:"probe_override,omitempty"`
 	UpdatedAtNs                      int64  `json:"updated_at_ns"`
 }
 

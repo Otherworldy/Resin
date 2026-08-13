@@ -18,8 +18,8 @@ import { formatDateTime, formatRelativeTime } from "../../lib/time";
 import { listPlatforms } from "../platforms/api";
 import type { Platform } from "../platforms/types";
 import { listSubscriptions } from "../subscriptions/api";
-import { getNode, listNodes, probeEgress, probeLatency } from "./api";
-import type { NodeSummary } from "./types";
+import { getNode, listNodes, probeEgress, probeLatency, batchProbeEgress, batchProbeLatency } from "./api";
+import type { NodeSummary, LatencyProbeResult } from "./types";
 import { getAllRegions, getRegionName } from "./regions";
 import type { NodeListFilters, NodeSortBy, SortOrder } from "./types";
 
@@ -275,6 +275,8 @@ export function NodesPage() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [pendingEgressHashes, setPendingEgressHashes] = useState<Set<string>>(() => new Set());
   const [pendingLatencyHashes, setPendingLatencyHashes] = useState<Set<string>>(() => new Set());
+  const [selectedNodeHashes, setSelectedNodeHashes] = useState<Set<string>>(() => new Set());
+  const [batchProbeRunning, setBatchProbeRunning] = useState<ProbeAction | null>(null);
   const { toasts, showToast, dismissToast } = useToast();
   const pendingEgressHashesRef = useRef<Set<string>>(new Set());
   const pendingLatencyHashesRef = useRef<Set<string>>(new Set());
@@ -402,10 +404,15 @@ export function NodesPage() {
   });
 
   const probeLatencyMutation = useMutation({
-    mutationFn: async (hash: string) => probeLatency(hash),
+    mutationFn: async (hash: string) => probeLatency(hash, activeFilters.platform_id || undefined),
     onSuccess: async (result) => {
       await refreshNodes();
-      showToast("success", t("延迟探测完成：延迟={{latency}}", { latency: formatLatency(result.latency_ewma_ms) }));
+      showToast(
+        "success",
+        result.test_url
+          ? t("延迟探测完成：延迟={{latency}}，测速连接={{url}}", { latency: formatLatency(result.latency_ewma_ms), url: result.test_url })
+          : t("延迟探测完成：延迟={{latency}}", { latency: formatLatency(result.latency_ewma_ms) })
+      );
     },
     onError: async (error) => {
       await refreshNodes();
@@ -482,6 +489,69 @@ export function NodesPage() {
       // Mutation callbacks already surface the failure to the user.
     } finally {
       clearProbePending(hash, "latency");
+    }
+  };
+
+  const toggleRowSelect = (hash: string) => {
+    setSelectedNodeHashes((prev) => {
+      const next = new Set(prev);
+      if (next.has(hash)) {
+        next.delete(hash);
+      } else {
+        next.add(hash);
+      }
+      return next;
+    });
+  };
+
+  const toggleAllRows = () => {
+    const visibleHashes = nodes.map((n) => n.node_hash);
+    if (visibleHashes.length === 0) {
+      return;
+    }
+    const allSelected = visibleHashes.every((h) => selectedNodeHashes.has(h));
+    setSelectedNodeHashes(allSelected ? new Set() : new Set(visibleHashes));
+  };
+
+  const clearRowSelection = () => setSelectedNodeHashes(new Set());
+
+  const runBatchProbe = async (action: ProbeAction) => {
+    const hashes = Array.from(selectedNodeHashes);
+    if (hashes.length === 0 || batchProbeRunning) {
+      return;
+    }
+    setBatchProbeRunning(action);
+    try {
+      const resp = action === "egress" ? await batchProbeEgress(hashes) : await batchProbeLatency(hashes, activeFilters.platform_id || undefined);
+      const failed = resp.items.filter((item) => item.error).length;
+      const okCount = resp.items.length - failed;
+      const actionLabel = action === "egress" ? t("出口探测") : t("延迟测速");
+      const testURLs = [
+        ...new Set(
+          resp.items
+            .map((item) => (item.result && "test_url" in item.result ? (item.result as LatencyProbeResult).test_url : undefined))
+            .filter((url): url is string => Boolean(url))
+        ),
+      ];
+      const urlSuffix = testURLs.length > 0 ? t("，测速连接={{urls}}", { urls: testURLs.join(", ") }) : "";
+      if (failed > 0) {
+        showToast("error", `${t("批量{{action}}完成：成功 {{ok}} 个，失败 {{failed}} 个", {
+          action: actionLabel,
+          ok: okCount,
+          failed,
+        })}${urlSuffix}`);
+      } else {
+        showToast("success", `${t("批量{{action}}完成：全部 {{ok}} 个节点成功", {
+          action: actionLabel,
+          ok: okCount,
+        })}${urlSuffix}`);
+      }
+      await refreshNodes();
+      clearRowSelection();
+    } catch (error) {
+      showToast("error", formatApiErrorMessage(error, t));
+    } finally {
+      setBatchProbeRunning(null);
     }
   };
 
@@ -819,14 +889,36 @@ export function NodesPage() {
             <p>{t("没有匹配的节点")}</p>
           </div>
         ) : null}
-
         {nodes.length ? (
-          <DataTable
-            data={nodes}
-            columns={nodeColumns}
-            onRowClick={(node) => openDrawer(node.node_hash)}
-            getRowId={(node) => node.node_hash}
-          />
+          <>
+            {selectedNodeHashes.size > 0 ? (
+              <div className="nodes-batch-bar">
+                <span className="muted">{t("已选 {{count}} 个节点", { count: selectedNodeHashes.size })}</span>
+                <Button size="sm" onClick={() => void runBatchProbe("latency")} disabled={batchProbeRunning !== null}>
+                  <Zap size={14} />
+                  {batchProbeRunning === "latency" ? t("测速中...") : t("批量测速")}
+                </Button>
+                <Button size="sm" onClick={() => void runBatchProbe("egress")} disabled={batchProbeRunning !== null}>
+                  <Globe size={14} />
+                  {batchProbeRunning === "egress" ? t("探测中...") : t("批量出口探测")}
+                </Button>
+                <Button size="sm" variant="ghost" onClick={clearRowSelection} disabled={batchProbeRunning !== null}>
+                  <X size={14} />
+                  {t("清除选择")}
+                </Button>
+              </div>
+            ) : null}
+            <DataTable
+              data={nodes}
+              columns={nodeColumns}
+              onRowClick={(node) => openDrawer(node.node_hash)}
+              getRowId={(node) => node.node_hash}
+              selectable
+              selectedRowIds={selectedNodeHashes}
+              onToggleRowSelect={toggleRowSelect}
+              onToggleAllRows={toggleAllRows}
+            />
+          </>
         ) : null}
 
         <OffsetPagination

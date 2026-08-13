@@ -40,6 +40,10 @@ type ProbeConfig struct {
 	LatencyTestURL     func() string
 	LatencyAuthorities func() []string
 
+	// ResolvePlatformProbe resolves a node hash to its platform-level probe
+	// override. Nil means all nodes use global probe configuration.
+	ResolvePlatformProbe func(hash node.Hash) PlatformProbeConfig
+
 	// OnProbeEvent is called after each probe attempt completes (egress or latency).
 	// The kind parameter is "egress" or "latency".
 	OnProbeEvent func(kind string)
@@ -67,7 +71,17 @@ type ProbeManager struct {
 	maxAuthorityLatencyTestInterval func() time.Duration
 	latencyTestURL                  func() string
 	latencyAuthorities              func() []string
+	resolvePlatformProbe            func(hash node.Hash) PlatformProbeConfig
 	onProbeEvent                    func(kind string)
+}
+
+// PlatformProbeConfig is the resolved per-platform probe override for a node.
+// Zero/empty fields mean "use global probe configuration".
+type PlatformProbeConfig struct {
+	Disabled        bool
+	LatencyInterval time.Duration // 0 = global
+	EgressInterval  time.Duration // 0 = global
+	TestURL         string        // "" = global
 }
 
 const (
@@ -269,6 +283,7 @@ func NewProbeManager(cfg ProbeConfig) *ProbeManager {
 		maxAuthorityLatencyTestInterval: cfg.MaxAuthorityLatencyTestInterval,
 		latencyTestURL:                  cfg.LatencyTestURL,
 		latencyAuthorities:              cfg.LatencyAuthorities,
+		resolvePlatformProbe:            cfg.ResolvePlatformProbe,
 		onProbeEvent:                    cfg.OnProbeEvent,
 	}
 }
@@ -276,6 +291,12 @@ func NewProbeManager(cfg ProbeConfig) *ProbeManager {
 // SetOnProbeEvent sets the probe event callback. Must be called before Start.
 func (m *ProbeManager) SetOnProbeEvent(fn func(kind string)) {
 	m.onProbeEvent = fn
+}
+
+// SetResolvePlatformProbe sets the platform probe override resolver.
+// Must be called before Start.
+func (m *ProbeManager) SetResolvePlatformProbe(fn func(hash node.Hash) PlatformProbeConfig) {
+	m.resolvePlatformProbe = fn
 }
 
 // Start launches the background probe workers.
@@ -385,10 +406,31 @@ func (m *ProbeManager) ProbeEgressSync(hash node.Hash) (*EgressProbeResult, erro
 // LatencyProbeResult holds the results of a synchronous latency probe.
 type LatencyProbeResult struct {
 	LatencyEwmaMs float64 `json:"latency_ewma_ms"`
+	// TestURL is the actual URL used for this probe (global or platform override).
+	TestURL string `json:"test_url"`
+}
+
+// probeLatencyTestURL resolves the effective latency test URL for a node,
+// preferring the platform-level override over the global default.
+func (m *ProbeManager) probeLatencyTestURL(hash node.Hash) string {
+	testURL := m.currentLatencyTestURL()
+	if m.resolvePlatformProbe != nil {
+		if ov := m.resolvePlatformProbe(hash); ov.TestURL != "" {
+			testURL = ov.TestURL
+		}
+	}
+	return testURL
 }
 
 // ProbeLatencySync performs a blocking latency probe and returns the results.
+// The effective test URL follows the platform override resolution.
 func (m *ProbeManager) ProbeLatencySync(hash node.Hash) (*LatencyProbeResult, error) {
+	return m.ProbeLatencySyncWithURL(hash, "")
+}
+
+// ProbeLatencySyncWithURL performs a blocking latency probe with an explicit
+// test URL. An empty testURL falls back to platform/global resolution.
+func (m *ProbeManager) ProbeLatencySyncWithURL(hash node.Hash, testURL string) (*LatencyProbeResult, error) {
 	if m.fetcher == nil {
 		return nil, fmt.Errorf("no probe fetcher configured")
 	}
@@ -406,7 +448,9 @@ func (m *ProbeManager) ProbeLatencySync(hash node.Hash) (*LatencyProbeResult, er
 		return nil, fmt.Errorf("node outbound not ready")
 	}
 
-	testURL := m.currentLatencyTestURL()
+	if testURL == "" {
+		testURL = m.probeLatencyTestURL(hash)
+	}
 	domain := netutil.ExtractDomain(testURL)
 
 	// Record synchronous probe attempts for metrics parity with async paths.
@@ -428,6 +472,7 @@ func (m *ProbeManager) ProbeLatencySync(hash node.Hash) (*LatencyProbeResult, er
 
 	return &LatencyProbeResult{
 		LatencyEwmaMs: ewmaMs,
+		TestURL:       testURL,
 	}, nil
 }
 
@@ -457,10 +502,22 @@ func (m *ProbeManager) scanEgress() {
 			return true // skip nil outbound
 		}
 
+		// Platform-level probe override: disabled skips; shorter interval wins.
+		effInterval := interval
+		if m.resolvePlatformProbe != nil {
+			ov := m.resolvePlatformProbe(h)
+			if ov.Disabled {
+				return true
+			}
+			if ov.EgressInterval > 0 {
+				effInterval = ov.EgressInterval
+			}
+		}
+
 		// Check if due: lastAttempt + interval - lookahead <= now.
 		lastCheck := entry.LastEgressUpdateAttempt.Load()
 		if lastCheck > 0 {
-			nextDue := time.Unix(0, lastCheck).Add(interval).Add(-lookahead)
+			nextDue := time.Unix(0, lastCheck).Add(effInterval).Add(-lookahead)
 			if now.Before(nextDue) {
 				return true // not yet due
 			}
@@ -505,7 +562,19 @@ func (m *ProbeManager) scanLatency() {
 			return true // skip nil outbound
 		}
 
-		if !m.isLatencyProbeDue(entry, now, maxLatencyInterval, maxAuthorityInterval, authorities, lookahead) {
+		// Platform-level probe override: disabled skips; shorter interval wins.
+		effLatencyInterval := maxLatencyInterval
+		if m.resolvePlatformProbe != nil {
+			ov := m.resolvePlatformProbe(h)
+			if ov.Disabled {
+				return true
+			}
+			if ov.LatencyInterval > 0 {
+				effLatencyInterval = ov.LatencyInterval
+			}
+		}
+
+		if !m.isLatencyProbeDue(entry, now, effLatencyInterval, maxAuthorityInterval, authorities, lookahead) {
 			return true
 		}
 
@@ -545,7 +614,7 @@ func (m *ProbeManager) executeTask(task probeTask) {
 	case probeTaskKindEgress:
 		m.probeEgress(task.key.hash, entry)
 	case probeTaskKindLatency:
-		m.probeLatency(task.key.hash, entry, m.currentLatencyTestURL())
+		m.probeLatency(task.key.hash, entry, m.probeLatencyTestURL(task.key.hash))
 	}
 }
 

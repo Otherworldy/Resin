@@ -21,6 +21,7 @@ import (
 	"github.com/Resinat/Resin/internal/model"
 	"github.com/Resinat/Resin/internal/node"
 	"github.com/Resinat/Resin/internal/platform"
+	"github.com/Resinat/Resin/internal/probe"
 	"github.com/Resinat/Resin/internal/proxy"
 	"github.com/Resinat/Resin/internal/requestlog"
 	"github.com/Resinat/Resin/internal/routing"
@@ -81,6 +82,12 @@ func newControlPlaneTestServerWithBodyLimit(
 		OpenDB:   geoip.NoOpOpen,
 	})
 
+	probeMgr := probe.NewProbeManager(probe.ProbeConfig{
+		Pool:        pool,
+		Fetcher:     func(node.Hash, string) ([]byte, time.Duration, error) { return nil, 0, nil },
+		Concurrency: 1,
+	})
+
 	cp := &service.ControlPlaneService{
 		Engine:         engine,
 		Pool:           pool,
@@ -88,6 +95,7 @@ func newControlPlaneTestServerWithBodyLimit(
 		Scheduler:      scheduler,
 		Router:         router,
 		GeoIP:          geoSvc,
+		ProbeMgr:       probeMgr,
 		MatcherRuntime: proxy.NewAccountMatcherRuntime(nil),
 		RuntimeCfg:     runtimeCfg,
 		EnvCfg: &config.EnvConfig{
@@ -1948,4 +1956,34 @@ func TestAPIContract_MetricsEndpoints(t *testing.T) {
 		t.Fatalf("invalid metrics from status: got %d, want %d, body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
 	}
 	assertErrorCode(t, rec, "INVALID_ARGUMENT")
+}
+
+// TestAPIContract_BatchProbe verifies the batch probe endpoints accept the
+// documented JSON body shape and route correctly alongside the single-node
+// {hash} routes.
+func TestAPIContract_BatchProbe(t *testing.T) {
+	srv, cp, _ := newControlPlaneTestServer(t)
+
+	hash := node.HashFromRawOptions([]byte(`{"type":"batch-probe"}`))
+	cp.Pool.AddNodeFromSub(hash, []byte(`{"type":"batch-probe"}`), "sub-test")
+	entry, ok := cp.Pool.GetEntry(hash)
+	if !ok {
+		t.Fatal("node missing after AddNodeFromSub")
+	}
+	ob := testutil.NewNoopOutbound()
+	entry.Outbound.Store(&ob)
+
+	body := map[string]any{"hashes": []string{hash.Hex()}}
+
+	// Valid body shape must not produce INVALID_ARGUMENT.
+	rec := doJSONRequest(t, srv, http.MethodPost, "/api/v1/nodes/actions/probe-latency", body, true)
+	if rec.Code == http.StatusBadRequest {
+		t.Fatalf("batch probe rejected valid body: %s", rec.Body.String())
+	}
+
+	// Empty hashes must be rejected cleanly.
+	rec = doJSONRequest(t, srv, http.MethodPost, "/api/v1/nodes/actions/probe-egress", map[string]any{"hashes": []string{}}, true)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("empty hashes: got %d, want 400", rec.Code)
+	}
 }

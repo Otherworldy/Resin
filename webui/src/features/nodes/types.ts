@@ -62,4 +62,5 @@ export type EgressProbeResult = {
 
 export type LatencyProbeResult = {
   latency_ewma_ms: number;
+  test_url?: string;
 };

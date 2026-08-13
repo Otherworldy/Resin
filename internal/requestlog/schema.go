@@ -64,6 +64,10 @@ CREATE INDEX IF NOT EXISTS idx_request_logs_platform_name ON request_logs(platfo
 CREATE INDEX IF NOT EXISTS idx_request_logs_plat_acct    ON request_logs(platform_id, account);
 CREATE INDEX IF NOT EXISTS idx_request_logs_target_host  ON request_logs(target_host);
 CREATE INDEX IF NOT EXISTS idx_request_logs_egress_ip    ON request_logs(egress_ip);
+CREATE INDEX IF NOT EXISTS idx_request_logs_http_status_ts_id
+	ON request_logs(http_status, ts_ns DESC, id ASC);
+CREATE INDEX IF NOT EXISTS idx_request_logs_net_ok_ts_id
+	ON request_logs(net_ok, ts_ns DESC, id ASC);
 `
 
 const obsoleteRequestLogIndexesDDL = `
