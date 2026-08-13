@@ -54,6 +54,8 @@ type NodeEntry struct {
 	LastLatencyProbeAttempt          atomic.Int64
 	LastAuthorityLatencyProbeAttempt atomic.Int64
 	LastEgressUpdateAttempt          atomic.Int64
+	LastLatencyMs                    atomic.Int64 // unix-nano of last successful latency observation
+	LastLatencyDomain                atomic.Value // string; domain of last successful latency observation
 	LatencyTable                     *LatencyTable // per-domain latency stats; nil if not initialized
 
 	// Outbound instance for this node.

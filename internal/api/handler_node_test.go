@@ -282,3 +282,30 @@ func TestHandleListNodes_EnabledFilter(t *testing.T) {
 		t.Fatalf("enabled=false total: got %v, want 1", body["total"])
 	}
 }
+
+func TestSortNodeSummaries_ReferenceLatency(t *testing.T) {
+	f := func(v float64) *float64 { return &v }
+	mk := func(hash string, last, ref *float64) service.NodeSummary {
+		return service.NodeSummary{NodeHash: hash, LastProbeLatencyMs: last, ReferenceLatencyMs: ref}
+	}
+	nodes := []service.NodeSummary{
+		mk("b", f(200), f(100)),  // last probe wins
+		mk("a", nil, f(150)),
+		mk("c", nil, nil), // no values -> sorts last ascending
+	}
+	sortNodeSummaries(nodes, Sorting{SortBy: "reference_latency", SortOrder: "asc"})
+	wantAsc := []string{"a", "b", "c"} // 150 < 200; no-value last
+	for i, n := range nodes {
+		if n.NodeHash != wantAsc[i] {
+			t.Fatalf("asc[%d] = %s, want %s", i, n.NodeHash, wantAsc[i])
+		}
+	}
+
+	sortNodeSummaries(nodes, Sorting{SortBy: "reference_latency", SortOrder: "desc"})
+	wantDesc := []string{"b", "a", "c"} // 200 > 150; no-value still last in desc
+	for i, n := range nodes {
+		if n.NodeHash != wantDesc[i] {
+			t.Fatalf("desc[%d] = %s, want %s", i, n.NodeHash, wantDesc[i])
+		}
+	}
+}

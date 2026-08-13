@@ -229,6 +229,9 @@ function displayableReferenceLatencyMs(node: NodeSummary): number | null {
   if (getNodeDisplayStatus(node) !== "healthy") {
     return null;
   }
+  if (typeof node.last_probe_latency_ms === "number") {
+    return node.last_probe_latency_ms;
+  }
   if (!hasReferenceLatency(node)) {
     return null;
   }
@@ -635,7 +638,12 @@ export function NodesPage() {
     }),
     col.display({
       id: "reference_latency_ms",
-      header: t("参考延迟"),
+      header: () => (
+        <button type="button" className="table-sort-btn" onClick={() => changeSort("reference_latency")}>
+          {t("参考延迟")}
+          <span>{sortIndicator(sortBy === "reference_latency", sortOrder)}</span>
+        </button>
+      ),
       cell: (info) => {
         const node = info.row.original;
         const latencyMs = displayableReferenceLatencyMs(node);

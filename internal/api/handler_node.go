@@ -33,6 +33,19 @@ func nodeTagSortKey(n service.NodeSummary) string {
 	return bestTag
 }
 
+// nodeLatencySortKey returns the latency value used for sorting: the last
+// observed probe latency when present, otherwise the reference average.
+// Missing values always sort last, regardless of sort direction.
+func nodeLatencySortKey(n service.NodeSummary) (float64, bool) {
+	if n.LastProbeLatencyMs != nil {
+		return *n.LastProbeLatencyMs, true
+	}
+	if n.ReferenceLatencyMs != nil {
+		return *n.ReferenceLatencyMs, true
+	}
+	return 0, false
+}
+
 func compareNodeSummaries(sortBy string, a, b service.NodeSummary) int {
 	order := 0
 	switch sortBy {
@@ -53,6 +66,18 @@ func compareNodeSummaries(sortBy string, a, b service.NodeSummary) int {
 
 func sortNodeSummaries(nodes []service.NodeSummary, sorting Sorting) {
 	slices.SortStableFunc(nodes, func(a, b service.NodeSummary) int {
+		if sorting.SortBy == "reference_latency" {
+			la, oka := nodeLatencySortKey(a)
+			lb, okb := nodeLatencySortKey(b)
+			// Nodes without latency data always sort last, independent of direction.
+			if !oka != !okb {
+				if !oka {
+					return 1
+				}
+				return -1
+			}
+			return applySortOrder(cmp.Compare(la, lb), sorting.SortOrder)
+		}
 		return applySortOrder(compareNodeSummaries(sorting.SortBy, a, b), sorting.SortOrder)
 	})
 }
@@ -152,7 +177,7 @@ func HandleListNodes(cp *service.ControlPlaneService) http.HandlerFunc {
 			return
 		}
 
-		sorting, ok := parseSortingOrWriteInvalid(w, r, []string{"tag", "created_at", "failure_count", "region"}, "tag", "asc")
+		sorting, ok := parseSortingOrWriteInvalid(w, r, []string{"tag", "created_at", "failure_count", "region", "reference_latency"}, "tag", "asc")
 		if !ok {
 			return
 		}

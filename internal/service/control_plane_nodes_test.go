@@ -273,6 +273,9 @@ func TestGetNode_ReferenceLatencyMsUsesAuthorityAverage(t *testing.T) {
 		Ewma:        5 * time.Millisecond,
 		LastUpdated: time.Now(),
 	})
+	// Successful latency observation updates last-probe fields.
+	d := 77 * time.Millisecond
+	pool.RecordLatency(hash, "example.com", &d)
 
 	runtimeCfg := &atomic.Pointer[config.RuntimeConfig]{}
 	cfg := config.NewDefaultRuntimeConfig()
@@ -295,6 +298,15 @@ func TestGetNode_ReferenceLatencyMsUsesAuthorityAverage(t *testing.T) {
 	}
 	if *got.ReferenceLatencyMs != 50 {
 		t.Fatalf("reference_latency_ms = %v, want 50", *got.ReferenceLatencyMs)
+	}
+	if got.LastProbeLatencyMs == nil {
+		t.Fatal("last_probe_latency_ms should reflect the last successful probe")
+	}
+	if *got.LastProbeLatencyMs != 77 {
+		t.Fatalf("last_probe_latency_ms = %v, want 77", *got.LastProbeLatencyMs)
+	}
+	if got.LastProbeLatencyDomain != "example.com" {
+		t.Fatalf("last_probe_latency_domain = %q, want example.com", got.LastProbeLatencyDomain)
 	}
 }
 

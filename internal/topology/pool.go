@@ -610,6 +610,8 @@ func (p *GlobalNodePool) RecordLatency(hash node.Hash, rawTarget string, latency
 	if latency == nil || *latency <= 0 || entry.LatencyTable == nil {
 		return
 	}
+	entry.LastLatencyMs.Store(int64(*latency))
+	entry.LastLatencyDomain.Store(domain)
 
 	var decayWindow time.Duration
 	if p.latencyDecayWindow != nil {

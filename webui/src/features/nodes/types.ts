@@ -20,6 +20,8 @@ export type NodeSummary = {
   last_latency_probe_attempt?: string;
   last_authority_latency_probe_attempt?: string;
   last_egress_update_attempt?: string;
+  last_probe_latency_ms?: number;
+  last_probe_latency_domain?: string;
   tags: NodeTag[];
 };
 
@@ -32,7 +34,7 @@ export type PageResponse<T> = {
   unique_healthy_egress_ips: number;
 };
 
-export type NodeSortBy = "tag" | "created_at" | "failure_count" | "region";
+export type NodeSortBy = "tag" | "created_at" | "failure_count" | "region" | "reference_latency";
 export type SortOrder = "asc" | "desc";
 
 export type NodeListFilters = {

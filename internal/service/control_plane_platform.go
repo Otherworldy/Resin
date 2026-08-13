@@ -706,6 +706,8 @@ type NodeSummary struct {
 	LastAuthorityLatencyProbeAttempt string    `json:"last_authority_latency_probe_attempt,omitempty"`
 	ReferenceLatencyMs               *float64  `json:"reference_latency_ms,omitempty"`
 	LastEgressUpdateAttempt          string    `json:"last_egress_update_attempt,omitempty"`
+	LastProbeLatencyMs              *float64  `json:"last_probe_latency_ms,omitempty"`
+	LastProbeLatencyDomain          string    `json:"last_probe_latency_domain,omitempty"`
 	Tags                             []NodeTag `json:"tags"`
 }
 
@@ -769,6 +771,11 @@ func (s *ControlPlaneService) nodeEntryToSummary(h node.Hash, entry *node.NodeEn
 	}
 	if lastEgressAttempt := entry.LastEgressUpdateAttempt.Load(); lastEgressAttempt > 0 {
 		ns.LastEgressUpdateAttempt = time.Unix(0, lastEgressAttempt).UTC().Format(time.RFC3339Nano)
+	}
+	if lastMs := entry.LastLatencyMs.Load(); lastMs > 0 {
+		lms := float64(lastMs) / float64(time.Millisecond)
+		ns.LastProbeLatencyMs = &lms
+		ns.LastProbeLatencyDomain = entry.LastLatencyDomain.Load().(string)
 	}
 
 	// Build tags.
