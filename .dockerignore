@@ -9,3 +9,4 @@ webui/dist
 .vscode
 *.log
 .data/
+data/

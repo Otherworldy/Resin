@@ -3,7 +3,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: ghcr.io/resinat/resin:latest
+      args:
+        VERSION: local
+        # 无外网或访问不了 proxy.golang.org 时：GOPROXY=https://goproxy.cn,direct docker compose build
+        GOPROXY: ${GOPROXY:-}
+    image: resin:local
     container_name: resin
     restart: unless-stopped
     environment:
