@@ -356,8 +356,14 @@ Note: Once enabled, requests without authentication information are rejected ins
   "均衡": "Balanced",
   "优先低延迟": "Prefer low latency",
   "优先空闲出口 IP": "Prefer idle egress IP",
-  "租约保持时长": "Lease Sticky TTL",
   "租约保持时长（可选）": "Lease Sticky TTL (optional)",
+  "最大节点延迟（可选）": "Max Node Latency (optional)",
+  "最大节点延迟": "Max Node Latency",
+  "例如 500ms，留空表示不限制": "e.g. 500ms; leave empty for no limit",
+  "参考延迟（权威域名平均 EWMA）超过该值的节点不参与转发；留空或 0s 表示不限制。":
+    "Nodes whose reference latency (authority-domain average EWMA) exceeds this value are excluded from routing; leave empty or 0s for no limit.",
+  "最大节点延迟格式无效，例如 500ms、2s；留空表示不限制":
+    "Invalid max node latency, e.g. 500ms or 2s; leave empty for no limit",
   "节点名正则过滤规则": "Node name regex filters",
   "节点名正则过滤规则（可选）": "Node name regex filters (optional)",
   "地区过滤规则": "Region filters",

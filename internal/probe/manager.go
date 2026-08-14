@@ -862,6 +862,8 @@ func (m *ProbeManager) performEgressProbe(hash node.Hash) (netip.Addr, egressPro
 	if latency > 0 {
 		m.pool.RecordLatency(hash, egressTraceDomain, &latency)
 	}
+	// Reference latency changed — platforms with a max-latency threshold must re-evaluate this node.
+	m.pool.NotifyNodeDirty(hash)
 
 	ip, loc, err := ParseCloudflareTrace(body)
 	if err != nil {
@@ -883,6 +885,8 @@ func (m *ProbeManager) performLatencyProbe(hash node.Hash, testURL string) error
 
 	m.pool.RecordResult(hash, true)
 	m.pool.RecordLatency(hash, domain, &latency)
+	// Reference latency changed — platforms with a max-latency threshold must re-evaluate this node.
+	m.pool.NotifyNodeDirty(hash)
 	return nil
 }
 

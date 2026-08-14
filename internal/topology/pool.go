@@ -186,6 +186,7 @@ func (p *GlobalNodePool) RegisterPlatform(plat *platform.Platform) {
 	if _, exists := p.platformByID[plat.ID]; exists {
 		return
 	}
+	plat.LatencyAuthorities = p.latencyAuthorities
 	p.platformByID[plat.ID] = plat
 	if plat.Name != "" {
 		p.platformByName[plat.Name] = plat
@@ -217,6 +218,8 @@ func (p *GlobalNodePool) ReplacePlatform(next *platform.Platform) error {
 	if next == nil || next.ID == "" {
 		return ErrPlatformNotRegistered
 	}
+
+	next.LatencyAuthorities = p.latencyAuthorities
 
 	// Build the new platform's view before publish so readers never observe
 	// an empty, not-yet-built view due only to replacement.

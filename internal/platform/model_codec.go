@@ -72,6 +72,7 @@ func NewConfiguredPlatform(
 	allocationPolicy string,
 	passiveCircuitBreakerDisabled bool,
 	probeOverride *model.PlatformProbeOverride,
+	maxNodeLatencyNs int64,
 ) *Platform {
 	normalizedFixedHeaders, fixedHeaders, err := NormalizeFixedAccountHeaders(fixedAccountHeader)
 	if err != nil {
@@ -87,6 +88,7 @@ func NewConfiguredPlatform(
 	plat.AllocationPolicy = ParseAllocationPolicy(allocationPolicy)
 	plat.PassiveCircuitBreakerDisabled = passiveCircuitBreakerDisabled
 	plat.ProbeOverride = probeOverride
+	plat.MaxNodeLatencyNs = maxNodeLatencyNs
 	return plat
 }
 
@@ -144,5 +146,6 @@ func BuildFromModel(mp model.Platform) (*Platform, error) {
 		mp.AllocationPolicy,
 		mp.PassiveCircuitBreakerDisabled,
 		mp.ProbeOverride,
+		mp.MaxNodeLatencyNs,
 	), nil
 }

@@ -1,0 +1,1 @@
+ALTER TABLE platforms DROP COLUMN max_node_latency_ns;

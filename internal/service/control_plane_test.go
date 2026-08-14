@@ -891,6 +891,7 @@ func TestDeletePlatform_DoesNotDecodeCorruptPersistedFiltersJSON(t *testing.T) {
 		platformRow.AllocationPolicy,
 		true,
 		nil,
+		0,
 	))
 
 	cp := &ControlPlaneService{
@@ -955,6 +956,7 @@ func TestResetPlatformToDefault_SupportsBuiltInDefaultPlatform(t *testing.T) {
 		defaultRow.AllocationPolicy,
 		true,
 		nil,
+		0,
 	))
 
 	cp := &ControlPlaneService{
@@ -1098,6 +1100,7 @@ func TestResetPlatformToDefault_DoesNotDecodeCorruptPersistedFiltersJSON(t *test
 		platformRow.AllocationPolicy,
 		true,
 		nil,
+		0,
 	))
 
 	cp := &ControlPlaneService{
@@ -1285,11 +1288,11 @@ func TestResolvePlatformProbe(t *testing.T) {
 	platA := platform.NewConfiguredPlatform("p-a", "A", node.TagFilter{}, nil, 0, "", "RANDOM", "", "BALANCED", false, &model.PlatformProbeOverride{
 		Disabled:               true,
 		LatencyProbeIntervalNs: int64(time.Hour),
-	})
+	}, 0)
 	platB := platform.NewConfiguredPlatform("p-b", "B", node.TagFilter{}, nil, 0, "", "RANDOM", "", "BALANCED", false, &model.PlatformProbeOverride{
 		LatencyProbeIntervalNs: int64(30 * time.Minute),
 		LatencyTestURL:         "https://example.com/generate_204",
-	})
+	}, 0)
 	pool.RebuildPlatform(platA)
 	pool.RebuildPlatform(platB)
 	pool.RegisterPlatform(platA)
@@ -1310,7 +1313,7 @@ func TestResolvePlatformProbe(t *testing.T) {
 	// When every containing platform disables probing, the node is disabled.
 	platB2 := platform.NewConfiguredPlatform("p-b", "B", node.TagFilter{}, nil, 0, "", "RANDOM", "", "BALANCED", false, &model.PlatformProbeOverride{
 		Disabled: true,
-	})
+	}, 0)
 	pool.RebuildPlatform(platB2)
 	pool.ReplacePlatform(platB2)
 	if got := cp.ResolvePlatformProbe(hash); !got.Disabled {

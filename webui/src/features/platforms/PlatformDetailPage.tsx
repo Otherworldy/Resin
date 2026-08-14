@@ -559,6 +559,24 @@ export function PlatformDetailPage() {
                   </div>
 
                   <div className="field-group">
+                    <label className="field-label" htmlFor="detail-edit-max-node-latency">
+                      {t("最大节点延迟")}
+                    </label>
+                    <Input
+                      id="detail-edit-max-node-latency"
+                      placeholder={t("例如 500ms，留空表示不限制")}
+                      invalid={Boolean(editForm.formState.errors.max_node_latency)}
+                      {...editForm.register("max_node_latency")}
+                    />
+                    {editForm.formState.errors.max_node_latency?.message ? (
+                      <p className="field-error">{t(editForm.formState.errors.max_node_latency.message)}</p>
+                    ) : null}
+                    <p className="muted" style={{ marginTop: 4, fontSize: 12 }}>
+                      {t("参考延迟（权威域名平均 EWMA）超过该值的节点不参与转发；留空或 0s 表示不限制。")}
+                    </p>
+                  </div>
+
+                  <div className="field-group">
                     <label className="field-label" htmlFor="detail-edit-miss-action">
                       {t("反向代理账号解析出错策略")}
                     </label>

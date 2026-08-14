@@ -1,0 +1,1 @@
+ALTER TABLE platforms ADD COLUMN max_node_latency_ns INTEGER NOT NULL DEFAULT 0;

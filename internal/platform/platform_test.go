@@ -350,3 +350,56 @@ func TestPlatform_FullRebuild_ClearsOld(t *testing.T) {
 		t.Fatal("h2 should have been removed by rebuild")
 	}
 }
+
+func TestPlatform_EvaluateNode_MaxNodeLatency(t *testing.T) {
+	authorities := func() []string { return []string{"example.com"} }
+
+	p := NewPlatform("p1", "Test", nil, nil)
+	p.MaxNodeLatencyNs = int64(150 * time.Millisecond)
+	p.LatencyAuthorities = authorities
+
+	fast := makeFullyRoutableEntry(makeHash(`{"type":"ss","n":1}`), "sub1")
+	slow := makeFullyRoutableEntry(makeHash(`{"type":"ss","n":2}`), "sub1")
+	// Override EWMA: fast below threshold, slow above it.
+	fast.LatencyTable.LoadEntry("example.com", node.DomainLatencyStats{Ewma: 100 * time.Millisecond, LastUpdated: time.Now()})
+	slow.LatencyTable.LoadEntry("example.com", node.DomainLatencyStats{Ewma: 500 * time.Millisecond, LastUpdated: time.Now()})
+
+	p.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool) {
+		fn(fast.Hash, fast)
+		fn(slow.Hash, slow)
+	}, alwaysLookup, usGeoLookup)
+
+	if p.View().Size() != 1 || !p.View().Contains(fast.Hash) {
+		t.Fatalf("expected only the fast node routable, got size=%d", p.View().Size())
+	}
+	if p.View().Contains(slow.Hash) {
+		t.Fatal("slow node must be excluded when exceeding max_node_latency")
+	}
+
+	// Raising the threshold back re-admits the slow node on re-evaluation.
+	p.MaxNodeLatencyNs = int64(1 * time.Second)
+	p.NotifyDirty(slow.Hash, func(h node.Hash) (*node.NodeEntry, bool) {
+		return slow, true
+	}, alwaysLookup, usGeoLookup)
+	if !p.View().Contains(slow.Hash) {
+		t.Fatal("slow node should be routable again after threshold raise")
+	}
+}
+
+func TestPlatform_EvaluateNode_MaxNodeLatency_NoAuthorities(t *testing.T) {
+	// Without authority domains the threshold filter must not exclude anything.
+	p := NewPlatform("p1", "Test", nil, nil)
+	p.MaxNodeLatencyNs = int64(1) // tiny threshold, but no authorities configured
+	p.LatencyAuthorities = nil
+
+	h := makeHash(`{"type":"ss"}`)
+	entry := makeFullyRoutableEntry(h, "sub1")
+
+	p.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool) {
+		fn(h, entry)
+	}, alwaysLookup, usGeoLookup)
+
+	if p.View().Size() != 1 {
+		t.Fatalf("expected 1 routable node, got %d", p.View().Size())
+	}
+}

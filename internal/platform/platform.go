@@ -4,6 +4,7 @@ import (
 	"net/netip"
 	"regexp"
 	"sync"
+	"time"
 
 	"github.com/Resinat/Resin/internal/model"
 	"github.com/Resinat/Resin/internal/node"
@@ -42,6 +43,13 @@ type Platform struct {
 	AllocationPolicy                 AllocationPolicy
 	PassiveCircuitBreakerDisabled    bool
 	ProbeOverride                    *model.PlatformProbeOverride // nil = 全局探测配置
+
+	// MaxNodeLatencyNs excludes nodes whose reference latency (authority-domain
+	// EWMA average) exceeds this threshold from routing. 0 = no limit.
+	MaxNodeLatencyNs int64
+	// LatencyAuthorities resolves the current authority domains used to compute
+	// a node's reference latency. nil disables the threshold filter.
+	LatencyAuthorities func() []string
 
 	// Routable view & its lock.
 	// viewMu serializes both FullRebuild and NotifyDirty.
@@ -154,6 +162,15 @@ func (p *Platform) evaluateNode(
 	// 5. Has at least one latency record.
 	if !entry.HasLatency() {
 		return false
+	}
+
+	// 6. Reference latency must stay below the configured threshold.
+	if p.MaxNodeLatencyNs > 0 && p.LatencyAuthorities != nil {
+		if avgMs, ok := node.AverageEWMAForDomainsMs(entry, p.LatencyAuthorities()); ok {
+			if time.Duration(avgMs*float64(time.Millisecond)) > time.Duration(p.MaxNodeLatencyNs) {
+				return false
+			}
+		}
 	}
 
 	return true

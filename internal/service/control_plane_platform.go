@@ -23,19 +23,20 @@ import (
 
 // PlatformResponse is the API response model for a platform.
 type PlatformResponse struct {
-	ID                               string   `json:"id"`
-	Name                             string   `json:"name"`
-	StickyTTL                        string   `json:"sticky_ttl"`
-	RegexFilters                     []string `json:"regex_filters"`
-	RegionFilters                    []string `json:"region_filters"`
-	RoutableNodeCount                int      `json:"routable_node_count"`
-	ReverseProxyMissAction           string   `json:"reverse_proxy_miss_action"`
-	ReverseProxyEmptyAccountBehavior string   `json:"reverse_proxy_empty_account_behavior"`
-	ReverseProxyFixedAccountHeader   string   `json:"reverse_proxy_fixed_account_header"`
-	AllocationPolicy                 string                        `json:"allocation_policy"`
-	PassiveCircuitBreakerDisabled    bool                          `json:"passive_circuit_breaker_disabled"`
-	ProbeOverride                    *model.PlatformProbeOverride  `json:"probe_override,omitempty"`
-	UpdatedAt                        string                        `json:"updated_at"`
+	ID                               string                       `json:"id"`
+	Name                             string                       `json:"name"`
+	StickyTTL                        string                       `json:"sticky_ttl"`
+	RegexFilters                     []string                     `json:"regex_filters"`
+	RegionFilters                    []string                     `json:"region_filters"`
+	RoutableNodeCount                int                          `json:"routable_node_count"`
+	ReverseProxyMissAction           string                       `json:"reverse_proxy_miss_action"`
+	ReverseProxyEmptyAccountBehavior string                       `json:"reverse_proxy_empty_account_behavior"`
+	ReverseProxyFixedAccountHeader   string                       `json:"reverse_proxy_fixed_account_header"`
+	AllocationPolicy                 string                       `json:"allocation_policy"`
+	PassiveCircuitBreakerDisabled    bool                         `json:"passive_circuit_breaker_disabled"`
+	MaxNodeLatency                   string                       `json:"max_node_latency"`
+	ProbeOverride                    *model.PlatformProbeOverride `json:"probe_override,omitempty"`
+	UpdatedAt                        string                       `json:"updated_at"`
 }
 
 func platformToResponse(p model.Platform) PlatformResponse {
@@ -53,6 +54,7 @@ func platformToResponse(p model.Platform) PlatformResponse {
 		ReverseProxyFixedAccountHeader:   fixedHeader,
 		AllocationPolicy:                 p.AllocationPolicy,
 		PassiveCircuitBreakerDisabled:    p.PassiveCircuitBreakerDisabled,
+		MaxNodeLatency:                   time.Duration(p.MaxNodeLatencyNs).String(),
 		ProbeOverride:                    cloneProbeOverride(p.ProbeOverride),
 		UpdatedAt:                        time.Unix(0, p.UpdatedAtNs).UTC().Format(time.RFC3339Nano),
 	}
@@ -150,6 +152,7 @@ type platformConfig struct {
 	ReverseProxyFixedAccountHeader   string
 	AllocationPolicy                 string
 	PassiveCircuitBreakerDisabled    bool
+	MaxNodeLatencyNs                 int64
 	ProbeOverride                    *model.PlatformProbeOverride
 }
 
@@ -196,6 +199,7 @@ func platformConfigFromModel(mp model.Platform) platformConfig {
 		ReverseProxyFixedAccountHeader:   normalizeHeaderFieldName(mp.ReverseProxyFixedAccountHeader),
 		AllocationPolicy:                 mp.AllocationPolicy,
 		PassiveCircuitBreakerDisabled:    mp.PassiveCircuitBreakerDisabled,
+		MaxNodeLatencyNs:                 mp.MaxNodeLatencyNs,
 		ProbeOverride:                    cloneProbeOverride(mp.ProbeOverride),
 	}
 }
@@ -220,6 +224,7 @@ func (cfg platformConfig) toModel(id string, updatedAtNs int64) model.Platform {
 		ReverseProxyFixedAccountHeader:   cfg.ReverseProxyFixedAccountHeader,
 		AllocationPolicy:                 cfg.AllocationPolicy,
 		PassiveCircuitBreakerDisabled:    cfg.PassiveCircuitBreakerDisabled,
+		MaxNodeLatencyNs:                 cfg.MaxNodeLatencyNs,
 		ProbeOverride:                    cloneProbeOverride(cfg.ProbeOverride),
 		UpdatedAtNs:                      updatedAtNs,
 	}
@@ -242,6 +247,7 @@ func (cfg platformConfig) toRuntime(id string) (*platform.Platform, error) {
 		cfg.AllocationPolicy,
 		cfg.PassiveCircuitBreakerDisabled,
 		cloneProbeOverride(cfg.ProbeOverride),
+		cfg.MaxNodeLatencyNs,
 	), nil
 }
 
@@ -341,6 +347,14 @@ func setPlatformAllocationPolicy(cfg *platformConfig, policy string) *ServiceErr
 	return nil
 }
 
+func setPlatformMaxNodeLatency(cfg *platformConfig, d time.Duration) *ServiceError {
+	if d < 0 {
+		return invalidArg("max_node_latency: must be >= 0")
+	}
+	cfg.MaxNodeLatencyNs = int64(d)
+	return nil
+}
+
 func validatePlatformConfig(cfg *platformConfig, validateRegionFilters bool) *ServiceError {
 	if validateRegionFilters {
 		if err := platform.ValidateRegionFilters(cfg.RegionFilters); err != nil {
@@ -411,15 +425,16 @@ func (s *ControlPlaneService) GetPlatform(id string) (*PlatformResponse, error) 
 
 // CreatePlatformRequest holds create platform parameters.
 type CreatePlatformRequest struct {
-	Name                             *string  `json:"name"`
-	StickyTTL                        *string  `json:"sticky_ttl"`
-	RegexFilters                     []string `json:"regex_filters"`
-	RegionFilters                    []string `json:"region_filters"`
-	ReverseProxyMissAction           *string  `json:"reverse_proxy_miss_action"`
-	ReverseProxyEmptyAccountBehavior *string  `json:"reverse_proxy_empty_account_behavior"`
-	ReverseProxyFixedAccountHeader   *string  `json:"reverse_proxy_fixed_account_header"`
-	AllocationPolicy                 *string  `json:"allocation_policy"`
-	PassiveCircuitBreakerDisabled    *bool    `json:"passive_circuit_breaker_disabled"`
+	Name                             *string                      `json:"name"`
+	StickyTTL                        *string                      `json:"sticky_ttl"`
+	RegexFilters                     []string                     `json:"regex_filters"`
+	RegionFilters                    []string                     `json:"region_filters"`
+	ReverseProxyMissAction           *string                      `json:"reverse_proxy_miss_action"`
+	ReverseProxyEmptyAccountBehavior *string                      `json:"reverse_proxy_empty_account_behavior"`
+	ReverseProxyFixedAccountHeader   *string                      `json:"reverse_proxy_fixed_account_header"`
+	AllocationPolicy                 *string                      `json:"allocation_policy"`
+	PassiveCircuitBreakerDisabled    *bool                        `json:"passive_circuit_breaker_disabled"`
+	MaxNodeLatency                   *string                      `json:"max_node_latency"`
 	ProbeOverride                    *model.PlatformProbeOverride `json:"probe_override"`
 }
 
@@ -477,6 +492,15 @@ func (s *ControlPlaneService) CreatePlatform(req CreatePlatformRequest) (*Platfo
 	}
 	if req.PassiveCircuitBreakerDisabled != nil {
 		cfg.PassiveCircuitBreakerDisabled = *req.PassiveCircuitBreakerDisabled
+	}
+	if req.MaxNodeLatency != nil {
+		d, err := time.ParseDuration(*req.MaxNodeLatency)
+		if err != nil {
+			return nil, invalidArg("max_node_latency: " + err.Error())
+		}
+		if err := setPlatformMaxNodeLatency(&cfg, d); err != nil {
+			return nil, err
+		}
 	}
 	if req.ProbeOverride != nil {
 		if err := validatePlatformProbeOverride(req.ProbeOverride); err != nil {
@@ -601,6 +625,13 @@ func (s *ControlPlaneService) UpdatePlatform(id string, patchJSON json.RawMessag
 	} else if ok {
 		cfg.PassiveCircuitBreakerDisabled = disabled
 	}
+	if d, ok, err := patch.optionalDurationString("max_node_latency"); err != nil {
+		return nil, err
+	} else if ok {
+		if err := setPlatformMaxNodeLatency(&cfg, d); err != nil {
+			return nil, err
+		}
+	}
 	if raw, ok, err := patch.optionalRawMessage("probe_override"); err != nil {
 		return nil, err
 	} else if ok {
@@ -706,8 +737,8 @@ type NodeSummary struct {
 	LastAuthorityLatencyProbeAttempt string    `json:"last_authority_latency_probe_attempt,omitempty"`
 	ReferenceLatencyMs               *float64  `json:"reference_latency_ms,omitempty"`
 	LastEgressUpdateAttempt          string    `json:"last_egress_update_attempt,omitempty"`
-	LastProbeLatencyMs              *float64  `json:"last_probe_latency_ms,omitempty"`
-	LastProbeLatencyDomain          string    `json:"last_probe_latency_domain,omitempty"`
+	LastProbeLatencyMs               *float64  `json:"last_probe_latency_ms,omitempty"`
+	LastProbeLatencyDomain           string    `json:"last_probe_latency_domain,omitempty"`
 	Tags                             []NodeTag `json:"tags"`
 }
 

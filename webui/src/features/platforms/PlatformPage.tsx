@@ -263,6 +263,21 @@ export function PlatformPage() {
               </div>
 
               <div className="field-group">
+                <label className="field-label" htmlFor="create-max-node-latency">
+                  {t("最大节点延迟（可选）")}
+                </label>
+                <Input
+                  id="create-max-node-latency"
+                  placeholder={t("例如 500ms，留空表示不限制")}
+                  invalid={Boolean(createForm.formState.errors.max_node_latency)}
+                  {...createForm.register("max_node_latency")}
+                />
+                {createForm.formState.errors.max_node_latency?.message ? (
+                  <p className="field-error">{t(createForm.formState.errors.max_node_latency.message)}</p>
+                ) : null}
+              </div>
+
+              <div className="field-group">
                 <label className="field-label" htmlFor="create-miss-action">
                   {t("反向代理账号解析出错策略")}
                 </label>

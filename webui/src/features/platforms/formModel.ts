@@ -38,6 +38,7 @@ export const platformFormSchema = z.object({
   reverse_proxy_fixed_account_header: z.string().optional(),
   allocation_policy: z.enum(allocationPolicies),
   passive_circuit_breaker_disabled: z.boolean(),
+  max_node_latency: z.string().optional(),
   probe_disabled: z.boolean(),
   probe_latency_interval: z.string().optional(),
   probe_egress_interval: z.string().optional(),
@@ -67,6 +68,13 @@ export const platformFormSchema = z.object({
       message: "出口探测间隔格式无效，例如 6h、24h",
     });
   }
+  if (Number.isNaN(parseGoDurationNs(value.max_node_latency ?? ""))) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["max_node_latency"],
+      message: "最大节点延迟格式无效，例如 500ms、2s；留空表示不限制",
+    });
+  }
 });
 
 export type PlatformFormValues = z.infer<typeof platformFormSchema>;
@@ -81,6 +89,7 @@ export const defaultPlatformFormValues: PlatformFormValues = {
   reverse_proxy_fixed_account_header: "Authorization",
   allocation_policy: "BALANCED",
   passive_circuit_breaker_disabled: false,
+  max_node_latency: "",
   probe_disabled: false,
   probe_latency_interval: "",
   probe_egress_interval: "",
@@ -101,6 +110,7 @@ export function platformToFormValues(platform: Platform): PlatformFormValues {
     reverse_proxy_fixed_account_header: platform.reverse_proxy_fixed_account_header,
     allocation_policy: platform.allocation_policy,
     passive_circuit_breaker_disabled: platform.passive_circuit_breaker_disabled,
+    max_node_latency: platform.max_node_latency === "0s" ? "" : platform.max_node_latency,
     probe_disabled: platform.probe_override?.disabled ?? false,
     probe_latency_interval: platform.probe_override?.latency_probe_interval_ns
       ? formatNsAsGoDuration(platform.probe_override.latency_probe_interval_ns)
@@ -178,6 +188,7 @@ function toPlatformPayloadBase(values: PlatformFormValues) {
     reverse_proxy_fixed_account_header: parseHeaderLines(values.reverse_proxy_fixed_account_header).join("\n"),
     allocation_policy: values.allocation_policy,
     passive_circuit_breaker_disabled: values.passive_circuit_breaker_disabled,
+    max_node_latency: values.max_node_latency?.trim() || "0s",
     // 空对象代表清除平台探测覆盖（回退到全局探测配置）。
     probe_override: Object.keys(probeOverride).length > 0 ? probeOverride : {},
   };
@@ -188,6 +199,7 @@ export function toPlatformCreateInput(values: PlatformFormValues): PlatformCreat
   return {
     ...rest,
     sticky_ttl: values.sticky_ttl?.trim() || undefined,
+    max_node_latency: values.max_node_latency?.trim() || undefined,
     // 创建时探测覆盖为空则不传。
     ...(Object.keys(probeOverride).length > 0 ? { probe_override: probeOverride } : {}),
   };
