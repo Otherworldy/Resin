@@ -628,19 +628,28 @@ export function NodesPage() {
     col.accessor("egress_ip", {
       header: t("出口 IP"),
       cell: (info) => {
-        const node = info.row.original;
         const val = info.getValue() || "-";
         return (
           <div style={{ maxWidth: "100px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={val}>
             {val}
-            {node.relay_node_hash ? (
-              <span
-                className="relay-probe-badge"
-                title={t("经中转链探测：{{relay}}", { relay: node.relay_node_tag || node.relay_node_hash })}
-              >
-                ⤳{t("中转")}
-              </span>
-            ) : null}
+          </div>
+        );
+      },
+    }),
+    col.accessor("relay_node_tag", {
+      header: t("中转节点"),
+      cell: (info) => {
+        const node = info.row.original;
+        if (!node.relay_node_hash) {
+          return "-";
+        }
+        const val = node.relay_node_tag || node.relay_node_hash;
+        return (
+          <div
+            style={{ maxWidth: "140px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+            title={t("经中转链探测：{{relay}}", { relay: val })}
+          >
+            {val}
           </div>
         );
       },

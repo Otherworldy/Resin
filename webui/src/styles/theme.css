@@ -3546,15 +3546,3 @@ a {
     transform: translateY(-20px) scale(0.92);
   }
 }
-
-.relay-probe-badge {
-  display: inline-block;
-  margin-left: 4px;
-  padding: 0 4px;
-  border-radius: 4px;
-  font-size: 10px;
-  line-height: 16px;
-  color: var(--text-secondary, #6b7280);
-  background: var(--bg-muted, rgba(127, 127, 127, 0.12));
-  white-space: nowrap;
-}
