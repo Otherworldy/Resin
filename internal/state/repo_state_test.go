@@ -451,6 +451,7 @@ func TestStateRepo_Platforms_CRUD(t *testing.T) {
 		RegexFilters: []string{}, RegionFilters: []string{},
 		ReverseProxyMissAction: "TREAT_AS_EMPTY", AllocationPolicy: "BALANCED",
 		PassiveCircuitBreakerDisabled: true,
+		RelayNodeHash:                 "0123456789abcdef0123456789abcdef",
 		UpdatedAtNs:                   now,
 	}
 	if err := repo.UpsertPlatform(p); err != nil {
@@ -463,6 +464,9 @@ func TestStateRepo_Platforms_CRUD(t *testing.T) {
 	}
 	if got.Name != "Default" {
 		t.Fatalf("unexpected get result: %+v", got)
+	}
+	if got.RelayNodeHash != "0123456789abcdef0123456789abcdef" {
+		t.Fatalf("unexpected relay_node_hash: got %q", got.RelayNodeHash)
 	}
 	if got.ReverseProxyEmptyAccountBehavior != "RANDOM" {
 		t.Fatalf(

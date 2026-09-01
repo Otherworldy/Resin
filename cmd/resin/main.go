@@ -246,10 +246,14 @@ func newTopologyRuntime(
 		return nil, fmt.Errorf("singbox builder: %w", err)
 	}
 	outboundMgr := outbound.NewOutboundManager(pool, singboxBuilder)
+	singboxBuilder.SetRelayManager(outboundMgr)
 
 	probeMgr := probe.NewProbeManager(probe.ProbeConfig{
 		Pool:        pool,
 		Concurrency: envCfg.ProbeConcurrency,
+		// Node global probes always ride the node's own direct outbound.
+		// Relay chains (中转链) are probed separately below and recorded on
+		// chain states, never on the node's direct state.
 		Fetcher: func(hash node.Hash, url string) ([]byte, time.Duration, error) {
 			ctx, cancel := context.WithTimeout(context.Background(), envCfg.ProbeTimeout)
 			defer cancel()
@@ -270,6 +274,26 @@ func newTopologyRuntime(
 				},
 			})
 		},
+		// Relay chain probes ride the platform-configured chain
+		// (relay → landing), recorded on chain states.
+		RelayChainFetcher: func(relay, landing node.Hash, url string) ([]byte, time.Duration, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), envCfg.ProbeTimeout)
+			defer cancel()
+			ob, err := outboundMgr.EnsureChainedOutbound(landing, relay)
+			if err != nil {
+				return nil, 0, err
+			}
+			return netutil.HTTPGetViaOutbound(ctx, ob, url, netutil.OutboundHTTPOptions{
+				RequireStatusOK: false,
+				OnConnLifecycle: func(op netutil.ConnLifecycleOp) {
+					if onProbeConnLifecycle != nil {
+						onProbeConnLifecycle(op)
+					}
+				},
+			})
+		},
+		RelayChainTargets:  pool.RelayChainTargets,
+		RelayChainRecorder: pool,
 		MaxEgressTestInterval: func() time.Duration {
 			return time.Duration(runtimeConfigSnapshot(runtimeCfg).MaxEgressTestInterval)
 		},
@@ -296,6 +320,7 @@ func newTopologyRuntime(
 	pool.SetOnNodeRemoved(func(hash node.Hash, entry *node.NodeEntry) {
 		markNodeRemovedDirty(engine, hash, entry)
 		outboundMgr.RemoveNodeOutbound(entry)
+		pool.ClearChainStatesForNode(hash)
 		if entry != nil && entry.LatencyTable != nil {
 			entry.LatencyTable.Close()
 		}
@@ -651,15 +676,29 @@ func (a *runtimeStatsAdapter) PlatformEgressIPCount(platformID string) (int, boo
 	}
 	seen := make(map[netip.Addr]struct{})
 	plat.View().Range(func(h node.Hash) bool {
-		entry, ok := a.pool.GetEntry(h)
-		if ok {
-			if ip := entry.GetEgressIP(); ip.IsValid() {
-				seen[ip] = struct{}{}
-			}
+		if ip := a.platformEgressIP(plat, h); ip.IsValid() {
+			seen[ip] = struct{}{}
 		}
 		return true
 	})
 	return len(seen), true
+}
+
+// platformEgressIP resolves a platform-view node's egress IP. Relay platforms
+// use the chain state (probed through the relay); direct platforms use the
+// node's own state.
+func (a *runtimeStatsAdapter) platformEgressIP(plat *platform.Platform, h node.Hash) netip.Addr {
+	if !plat.RelayNodeHash.IsZero() && plat.ChainStateResolver != nil {
+		if state := plat.ChainStateResolver(plat.RelayNodeHash, h); state != nil {
+			return state.GetEgressIP()
+		}
+		return netip.Addr{}
+	}
+	entry, ok := a.pool.GetEntry(h)
+	if !ok {
+		return netip.Addr{}
+	}
+	return entry.GetEgressIP()
 }
 
 func (a *runtimeStatsAdapter) CollectNodeEWMAs(platformID string) []float64 {
@@ -681,6 +720,15 @@ func (a *runtimeStatsAdapter) CollectNodeEWMAs(platformID string) []float64 {
 			return nil
 		}
 		plat.View().Range(func(h node.Hash) bool {
+			// Relay platforms use chain latency; direct platforms use node latency.
+			if !plat.RelayNodeHash.IsZero() && plat.ChainStateResolver != nil {
+				if state := plat.ChainStateResolver(plat.RelayNodeHash, h); state != nil {
+					if avg, ok := node.AverageEWMAForTableMs(state.LatencyTable, authorities); ok {
+						ewmas = append(ewmas, avg)
+					}
+				}
+				return true
+			}
 			entry, ok := a.pool.GetEntry(h)
 			if ok {
 				if avg, ok := node.AverageEWMAForDomainsMs(entry, authorities); ok {

@@ -24,6 +24,13 @@ type OutboundBuilder interface {
 	Build(rawOptions json.RawMessage) (adapter.Outbound, error)
 }
 
+// ChainedOutboundBuilder is implemented by builders that can construct an
+// outbound whose dialer detours through another outbound (relay node).
+type ChainedOutboundBuilder interface {
+	OutboundBuilder
+	BuildChained(rawOptions json.RawMessage, detourTag string) (adapter.Outbound, error)
+}
+
 // SingboxBuilderConfig configures SingboxBuilder construction.
 type SingboxBuilderConfig struct {
 	// DNSUpstreams configures Resin's node DNS chain.
@@ -44,6 +51,7 @@ type SingboxBuilder struct {
 	logFactory          log.Factory
 	dnsTransportManager *dns.TransportManager
 	dnsRouter           *dns.Router
+	relayManager        adapter.OutboundManager
 }
 
 // NewSingboxBuilderWithConfig creates a SingboxBuilder with a complete
@@ -125,21 +133,56 @@ func NewSingboxBuilderWithConfig(cfg SingboxBuilderConfig) (*SingboxBuilder, err
 	}, nil
 }
 
+// SetRelayManager wires the outbound manager used to resolve relay (detour)
+// tags when building chained outbounds. Must be called before BuildChained.
+func (b *SingboxBuilder) SetRelayManager(m adapter.OutboundManager) {
+	b.relayManager = m
+}
+
 // Build parses rawOptions (a complete sing-box outbound JSON object with
 // type/tag fields) into a real adapter.Outbound and runs it through the
 // lifecycle stages.
 func (b *SingboxBuilder) Build(rawOptions json.RawMessage) (adapter.Outbound, error) {
+	return b.buildWithContext(b.ctx, rawOptions, nil)
+}
+
+// BuildChained builds a real adapter.Outbound whose dialer detours through
+// the outbound registered under detourTag (i.e. the relay node).
+func (b *SingboxBuilder) BuildChained(rawOptions json.RawMessage, detourTag string) (adapter.Outbound, error) {
+	if b.relayManager == nil {
+		return nil, fmt.Errorf("singbox builder: relay manager not configured")
+	}
+	ctx := service.ContextWith[adapter.OutboundManager](b.ctx, b.relayManager)
+	return b.buildWithContext(ctx, rawOptions, &detourTag)
+}
+
+func (b *SingboxBuilder) buildWithContext(
+	ctx context.Context,
+	rawOptions json.RawMessage,
+	detourTag *string,
+) (adapter.Outbound, error) {
 	// 1. Parse via official option.Outbound path (strips type/tag, creates
 	//    typed options via OutboundOptionsRegistry + badjson.UnmarshallExcluded).
 	var outboundConfig option.Outbound
-	if err := sJson.UnmarshalContext(b.ctx, rawOptions, &outboundConfig); err != nil {
+	if err := sJson.UnmarshalContext(ctx, rawOptions, &outboundConfig); err != nil {
 		return nil, fmt.Errorf("parse outbound options: %w", err)
 	}
 
-	// 2. Create the outbound instance via the registry.
+	// 2. Inject detour when building a chained (relay) outbound.
+	if detourTag != nil {
+		wrapper, ok := outboundConfig.Options.(option.DialerOptionsWrapper)
+		if !ok {
+			return nil, fmt.Errorf("outbound type %s does not support dialer detour", outboundConfig.Type)
+		}
+		dialerOptions := wrapper.TakeDialerOptions()
+		dialerOptions.Detour = *detourTag
+		wrapper.ReplaceDialerOptions(dialerOptions)
+	}
+
+	// 3. Create the outbound instance via the registry.
 	logger := b.logFactory.NewLogger("outbound/" + outboundConfig.Type)
 	ob, err := b.registry.CreateOutbound(
-		b.ctx,
+		ctx,
 		nil, // router — not needed for simple dialing
 		logger,
 		outboundConfig.Tag,
@@ -150,7 +193,7 @@ func (b *SingboxBuilder) Build(rawOptions json.RawMessage) (adapter.Outbound, er
 		return nil, fmt.Errorf("create outbound [%s]: %w", outboundConfig.Type, err)
 	}
 
-	// 3. Run lifecycle start stages. On failure, close and return error.
+	// 4. Run lifecycle start stages. On failure, close and return error.
 	for _, stage := range adapter.ListStartStages {
 		if err := adapter.LegacyStart(ob, stage); err != nil {
 			_ = common.Close(ob)

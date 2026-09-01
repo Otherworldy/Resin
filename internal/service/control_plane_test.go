@@ -1,6 +1,7 @@
 package service
 
 import (
+	"encoding/json"
 	"errors"
 	"net/netip"
 	"path/filepath"
@@ -1318,5 +1319,136 @@ func TestResolvePlatformProbe(t *testing.T) {
 	pool.ReplacePlatform(platB2)
 	if got := cp.ResolvePlatformProbe(hash); !got.Disabled {
 		t.Fatal("node should be probe-disabled when all containing platforms disable it")
+	}
+}
+
+// --- Relay node hash (中转节点) ---
+
+func seedPoolNode(pool *topology.GlobalNodePool, sub *subscription.Subscription, raw string) node.Hash {
+	hash := node.HashFromRawOptions([]byte(raw))
+	sub.ManagedNodes().StoreNode(hash, subscription.ManagedNode{Tags: []string{"seed"}})
+	entry := node.NewNodeEntry(hash, []byte(raw), time.Now(), 16)
+	entry.AddSubscriptionID(sub.ID)
+	entry.SetEgressIP(netip.MustParseAddr("1.2.3.4"))
+	entry.LatencyTable.LoadEntry("cloudflare.com", node.DomainLatencyStats{
+		Ewma:        50 * time.Millisecond,
+		LastUpdated: time.Now(),
+	})
+	ob := testutil.NewNoopOutbound()
+	entry.Outbound.Store(&ob)
+	pool.LoadNodeFromBootstrap(entry)
+	return hash
+}
+
+func newRelayPlatformTestService(t *testing.T) (*ControlPlaneService, node.Hash) {
+	t.Helper()
+	dir := t.TempDir()
+	engine, closer, err := state.PersistenceBootstrap(
+		filepath.Join(dir, "state"),
+		filepath.Join(dir, "cache"),
+	)
+	if err != nil {
+		t.Fatalf("PersistenceBootstrap: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = closer.Close()
+	})
+
+	subMgr := topology.NewSubscriptionManager()
+	sub := subscription.NewSubscription("sub-relay", "sub-relay", "https://example.com/sub", true, false)
+	subMgr.Register(sub)
+	pool := topology.NewGlobalNodePool(topology.PoolConfig{
+		SubLookup:              subMgr.Lookup,
+		GeoLookup:              func(netip.Addr) string { return "us" },
+		MaxLatencyTableEntries: 16,
+		MaxConsecutiveFailures: func() int { return 3 },
+		LatencyDecayWindow:     func() time.Duration { return 10 * time.Minute },
+	})
+	seedPoolNode(pool, sub, `{"type":"ss","server":"1.1.1.1","port":443}`)
+
+	cp := &ControlPlaneService{
+		Engine: engine,
+		Pool:   pool,
+		SubMgr: subMgr,
+		EnvCfg: &config.EnvConfig{
+			DefaultPlatformStickyTTL:              30 * time.Minute,
+			DefaultPlatformRegexFilters:           []string{},
+			DefaultPlatformRegionFilters:          []string{},
+			DefaultPlatformReverseProxyMissAction: "TREAT_AS_EMPTY",
+			DefaultPlatformAllocationPolicy:       "BALANCED",
+		},
+	}
+	relayHash := seedPoolNode(pool, sub, `{"type":"ss","server":"2.2.2.2","port":443}`)
+	return cp, relayHash
+}
+
+func TestCreatePlatform_WithRelayNodeHash(t *testing.T) {
+	cp, relayHash := newRelayPlatformTestService(t)
+	relayHex := relayHash.Hex()
+	name := "relay-platform"
+	created, err := cp.CreatePlatform(CreatePlatformRequest{Name: &name, RelayNodeHash: &relayHex})
+	if err != nil {
+		t.Fatalf("CreatePlatform: %v", err)
+	}
+	if created.RelayNodeHash != relayHex {
+		t.Fatalf("response relay_node_hash: got %q, want %q", created.RelayNodeHash, relayHex)
+	}
+	plat, ok := cp.Pool.GetPlatform(created.ID)
+	if !ok {
+		t.Fatalf("platform not registered: %s", created.ID)
+	}
+	if plat.RelayNodeHash != relayHash {
+		t.Fatalf("runtime relay hash: got %s, want %s", plat.RelayNodeHash.Hex(), relayHash.Hex())
+	}
+}
+
+func TestCreatePlatform_RejectsInvalidRelayNodeHash(t *testing.T) {
+	cp, _ := newRelayPlatformTestService(t)
+	name := "invalid-relay"
+	bad := "not-a-hex"
+	_, err := cp.CreatePlatform(CreatePlatformRequest{Name: &name, RelayNodeHash: &bad})
+	var svcErr *ServiceError
+	if !errors.As(err, &svcErr) || svcErr.Code != "INVALID_ARGUMENT" {
+		t.Fatalf("expected INVALID_ARGUMENT, got %v", err)
+	}
+}
+
+func TestCreatePlatform_RejectsUnknownRelayNodeHash(t *testing.T) {
+	cp, _ := newRelayPlatformTestService(t)
+	name := "unknown-relay"
+	unknown := node.Hash{0xAB, 0xCD}.Hex()
+	_, err := cp.CreatePlatform(CreatePlatformRequest{Name: &name, RelayNodeHash: &unknown})
+	var svcErr *ServiceError
+	if !errors.As(err, &svcErr) || svcErr.Code != "INVALID_ARGUMENT" {
+		t.Fatalf("expected INVALID_ARGUMENT for unknown relay node, got %v", err)
+	}
+}
+
+func TestUpdatePlatform_SetsAndClearsRelayNodeHash(t *testing.T) {
+	cp, relayHash := newRelayPlatformTestService(t)
+	relayHex := relayHash.Hex()
+	name := "relay-patch"
+	created, err := cp.CreatePlatform(CreatePlatformRequest{Name: &name})
+	if err != nil {
+		t.Fatalf("CreatePlatform: %v", err)
+	}
+	if created.RelayNodeHash != "" {
+		t.Fatalf("new platform should default to no relay, got %q", created.RelayNodeHash)
+	}
+
+	updated, err := cp.UpdatePlatform(created.ID, json.RawMessage(`{"relay_node_hash":"`+relayHex+`"}`))
+	if err != nil {
+		t.Fatalf("UpdatePlatform set relay: %v", err)
+	}
+	if updated.RelayNodeHash != relayHex {
+		t.Fatalf("updated relay_node_hash: got %q, want %q", updated.RelayNodeHash, relayHex)
+	}
+
+	cleared, err := cp.UpdatePlatform(created.ID, json.RawMessage(`{"relay_node_hash":""}`))
+	if err != nil {
+		t.Fatalf("UpdatePlatform clear relay: %v", err)
+	}
+	if cleared.RelayNodeHash != "" {
+		t.Fatalf("cleared relay_node_hash: got %q, want empty", cleared.RelayNodeHash)
 	}
 }

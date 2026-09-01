@@ -11,9 +11,19 @@ type routedOutbound struct {
 	Outbound adapter.Outbound
 }
 
+// transportKey derives the transport-pool key for this route so that different
+// relay paths never share pooled keep-alive transports.
+func (r routedOutbound) transportKey() TransportKey {
+	return TransportKey{
+		NodeHash:  r.Route.NodeHash,
+		RelayHash: r.Route.RelayNodeHash,
+	}
+}
+
 func resolveRoutedOutbound(
 	router *routing.Router,
 	pool outbound.PoolAccessor,
+	chains outbound.ChainedOutboundResolver,
 	platformName string,
 	account string,
 	target string,
@@ -27,6 +37,21 @@ func resolveRoutedOutbound(
 	if !ok {
 		return routedOutbound{}, ErrNoAvailableNodes
 	}
+
+	if !result.RelayNodeHash.IsZero() {
+		if chains == nil {
+			return routedOutbound{}, ErrNoAvailableNodes
+		}
+		ob, chainErr := chains.EnsureChainedOutbound(result.NodeHash, result.RelayNodeHash)
+		if chainErr != nil {
+			return routedOutbound{}, ErrNoAvailableNodes
+		}
+		return routedOutbound{
+			Route:    result,
+			Outbound: ob,
+		}, nil
+	}
+
 	obPtr := entry.Outbound.Load()
 	if obPtr == nil {
 		return routedOutbound{}, ErrNoAvailableNodes

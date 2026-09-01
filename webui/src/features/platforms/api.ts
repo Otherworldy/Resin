@@ -46,6 +46,7 @@ function normalizePlatform(raw: ApiPlatform): Platform {
       typeof raw.reverse_proxy_fixed_account_header === "string" ? raw.reverse_proxy_fixed_account_header : "",
     passive_circuit_breaker_disabled:
       typeof raw.passive_circuit_breaker_disabled === "boolean" ? raw.passive_circuit_breaker_disabled : false,
+    relay_node_hash: typeof raw.relay_node_hash === "string" ? raw.relay_node_hash : "",
   };
 }
 

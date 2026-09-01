@@ -47,6 +47,11 @@ type Platform struct {
 	// MaxNodeLatencyNs excludes nodes whose reference latency (authority-domain
 	// EWMA average) exceeds this threshold from routing. 0 = no limit.
 	MaxNodeLatencyNs int64
+	// RelayNodeHash is the platform's relay (中转) node hash. Zero means direct.
+	RelayNodeHash node.Hash
+	// ChainStateResolver resolves a relay→landing chain's probe state. Injected
+	// by the topology pool; nil disables chain mode evaluation.
+	ChainStateResolver func(relay, landing node.Hash) *node.ChainState
 	// LatencyAuthorities resolves the current authority domains used to compute
 	// a node's reference latency. nil disables the threshold filter.
 	LatencyAuthorities func() []string
@@ -92,7 +97,7 @@ func (p *Platform) FullRebuild(
 
 	p.view.Clear()
 	poolRange(func(h node.Hash, entry *node.NodeEntry) bool {
-		if p.evaluateNode(entry, subLookup, geoLookup) {
+		if p.evaluateNode(h, entry, subLookup, geoLookup) {
 			p.view.Add(h)
 		}
 		return true
@@ -117,7 +122,7 @@ func (p *Platform) NotifyDirty(
 		return
 	}
 
-	if p.evaluateNode(entry, subLookup, geoLookup) {
+	if p.evaluateNode(h, entry, subLookup, geoLookup) {
 		p.view.Add(h)
 	} else {
 		p.view.Remove(h)
@@ -125,23 +130,26 @@ func (p *Platform) NotifyDirty(
 }
 
 // evaluateNode checks all filter conditions for platform routability.
+// When the platform configures a relay (中转), evaluation switches to chain
+// mode: the node's health comes from the relay→landing chain state (probed
+// through the relay), never from the node's direct global state.
 func (p *Platform) evaluateNode(
+	h node.Hash,
 	entry *node.NodeEntry,
 	subLookup node.SubLookupFunc,
 	geoLookup GeoLookupFunc,
 ) bool {
-	// 0. Disabled nodes are never routable.
-	if entry.IsDisabledBySubscriptions(subLookup) {
+	if !p.RelayNodeHash.IsZero() {
+		return p.evaluateChainNode(h, entry, subLookup)
+	}
+
+	// 1. Static filter configuration (relay exclusion, tags).
+	if !p.evaluateFilters(h, entry, subLookup) {
 		return false
 	}
 
-	// 1. Healthy for routing (outbound ready + circuit not open).
+	// 2. Healthy for routing (outbound ready + circuit not open).
 	if !entry.IsHealthy() {
-		return false
-	}
-
-	// 2. Tag regex match.
-	if !entry.MatchTagFilter(p.RegexFilters, subLookup) {
 		return false
 	}
 
@@ -151,12 +159,9 @@ func (p *Platform) evaluateNode(
 		return false
 	}
 
-	// 4. Region filter (when configured).
-	if len(p.RegionFilters) > 0 {
-		region := entry.GetRegion(geoLookup)
-		if !MatchRegionFilter(region, p.RegionFilters) {
-			return false
-		}
+	// 4. Region filter (when configured) — direct state's egress region.
+	if !p.regionMatches(entry.GetRegion(geoLookup)) {
+		return false
 	}
 
 	// 5. Has at least one latency record.
@@ -171,6 +176,96 @@ func (p *Platform) evaluateNode(
 				return false
 			}
 		}
+	}
+
+	return true
+}
+
+// evaluateChainNode evaluates a landing node through this platform's relay
+// chain state: the chain must be probed (egress IP known, latency recorded)
+// and not circuit-broken. Region comes from the chain's egress region.
+func (p *Platform) evaluateChainNode(
+	h node.Hash,
+	entry *node.NodeEntry,
+	subLookup node.SubLookupFunc,
+) bool {
+	if !p.evaluateFilters(h, entry, subLookup) {
+		return false
+	}
+	if p.ChainStateResolver == nil {
+		return false
+	}
+	state := p.ChainStateResolver(p.RelayNodeHash, h)
+	if state == nil || state.IsCircuitOpen() {
+		return false
+	}
+
+	// Chain egress IP must be known.
+	egressIP := state.GetEgressIP()
+	if !egressIP.IsValid() {
+		return false
+	}
+
+	// Region filter (when configured) — chain state's egress region.
+	if !p.regionMatches(state.GetEgressRegion()) {
+		return false
+	}
+
+	// Has at least one latency record.
+	if !state.HasLatency() {
+		return false
+	}
+
+	// Reference latency must stay below the configured threshold.
+	if p.MaxNodeLatencyNs > 0 && p.LatencyAuthorities != nil {
+		if avgMs, ok := node.AverageEWMAForTableMs(state.LatencyTable, p.LatencyAuthorities()); ok {
+			if time.Duration(avgMs*float64(time.Millisecond)) > time.Duration(p.MaxNodeLatencyNs) {
+				return false
+			}
+		}
+	}
+
+	return true
+}
+
+func (p *Platform) regionMatches(region string) bool {
+	return len(p.RegionFilters) == 0 || MatchRegionFilter(region, p.RegionFilters)
+}
+
+// MatchesFilters reports whether the node matches this platform's static
+// filter configuration (relay-node exclusion, disabled-by-subscription,
+// tag regex), ignoring runtime health/egress/latency state **and region**
+// (region is chain-dependent when the platform configures a relay, and the
+// chain's egress region is only known after probing). It is used to decide
+// which relay chain a node's probes should ride, so that probe paths mirror
+// the platform's data-plane path.
+func (p *Platform) MatchesFilters(
+	h node.Hash,
+	entry *node.NodeEntry,
+	subLookup node.SubLookupFunc,
+) bool {
+	return p.evaluateFilters(h, entry, subLookup)
+}
+
+func (p *Platform) evaluateFilters(
+	h node.Hash,
+	entry *node.NodeEntry,
+	subLookup node.SubLookupFunc,
+) bool {
+	// 0. The relay node itself is never a landing candidate (relay→relay
+	//    self-loop would be invalid).
+	if !p.RelayNodeHash.IsZero() && h == p.RelayNodeHash {
+		return false
+	}
+
+	// 1. Disabled nodes are never routable.
+	if entry.IsDisabledBySubscriptions(subLookup) {
+		return false
+	}
+
+	// 2. Tag regex match.
+	if !entry.MatchTagFilter(p.RegexFilters, subLookup) {
+		return false
 	}
 
 	return true

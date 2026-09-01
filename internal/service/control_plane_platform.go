@@ -35,6 +35,7 @@ type PlatformResponse struct {
 	AllocationPolicy                 string                       `json:"allocation_policy"`
 	PassiveCircuitBreakerDisabled    bool                         `json:"passive_circuit_breaker_disabled"`
 	MaxNodeLatency                   string                       `json:"max_node_latency"`
+	RelayNodeHash                    string                       `json:"relay_node_hash"`
 	ProbeOverride                    *model.PlatformProbeOverride `json:"probe_override,omitempty"`
 	UpdatedAt                        string                       `json:"updated_at"`
 }
@@ -55,6 +56,7 @@ func platformToResponse(p model.Platform) PlatformResponse {
 		AllocationPolicy:                 p.AllocationPolicy,
 		PassiveCircuitBreakerDisabled:    p.PassiveCircuitBreakerDisabled,
 		MaxNodeLatency:                   time.Duration(p.MaxNodeLatencyNs).String(),
+		RelayNodeHash:                    p.RelayNodeHash,
 		ProbeOverride:                    cloneProbeOverride(p.ProbeOverride),
 		UpdatedAt:                        time.Unix(0, p.UpdatedAtNs).UTC().Format(time.RFC3339Nano),
 	}
@@ -153,6 +155,7 @@ type platformConfig struct {
 	AllocationPolicy                 string
 	PassiveCircuitBreakerDisabled    bool
 	MaxNodeLatencyNs                 int64
+	RelayNodeHash                    node.Hash
 	ProbeOverride                    *model.PlatformProbeOverride
 }
 
@@ -189,6 +192,12 @@ func (s *ControlPlaneService) defaultPlatformConfig(name string) platformConfig 
 }
 
 func platformConfigFromModel(mp model.Platform) platformConfig {
+	relayHash := node.Zero
+	if mp.RelayNodeHash != "" {
+		if h, err := node.ParseHex(mp.RelayNodeHash); err == nil {
+			relayHash = h
+		}
+	}
 	return platformConfig{
 		Name:                             mp.Name,
 		StickyTTLNs:                      mp.StickyTTLNs,
@@ -200,6 +209,7 @@ func platformConfigFromModel(mp model.Platform) platformConfig {
 		AllocationPolicy:                 mp.AllocationPolicy,
 		PassiveCircuitBreakerDisabled:    mp.PassiveCircuitBreakerDisabled,
 		MaxNodeLatencyNs:                 mp.MaxNodeLatencyNs,
+		RelayNodeHash:                    relayHash,
 		ProbeOverride:                    cloneProbeOverride(mp.ProbeOverride),
 	}
 }
@@ -213,6 +223,10 @@ func cloneProbeOverride(ov *model.PlatformProbeOverride) *model.PlatformProbeOve
 }
 
 func (cfg platformConfig) toModel(id string, updatedAtNs int64) model.Platform {
+	relayHash := ""
+	if !cfg.RelayNodeHash.IsZero() {
+		relayHash = cfg.RelayNodeHash.Hex()
+	}
 	return model.Platform{
 		ID:                               id,
 		Name:                             cfg.Name,
@@ -225,6 +239,7 @@ func (cfg platformConfig) toModel(id string, updatedAtNs int64) model.Platform {
 		AllocationPolicy:                 cfg.AllocationPolicy,
 		PassiveCircuitBreakerDisabled:    cfg.PassiveCircuitBreakerDisabled,
 		MaxNodeLatencyNs:                 cfg.MaxNodeLatencyNs,
+		RelayNodeHash:                    relayHash,
 		ProbeOverride:                    cloneProbeOverride(cfg.ProbeOverride),
 		UpdatedAtNs:                      updatedAtNs,
 	}
@@ -235,7 +250,7 @@ func (cfg platformConfig) toRuntime(id string) (*platform.Platform, error) {
 	if err != nil {
 		return nil, err
 	}
-	return platform.NewConfiguredPlatform(
+	plat := platform.NewConfiguredPlatform(
 		id,
 		cfg.Name,
 		compiledRegexFilters,
@@ -248,7 +263,9 @@ func (cfg platformConfig) toRuntime(id string) (*platform.Platform, error) {
 		cfg.PassiveCircuitBreakerDisabled,
 		cloneProbeOverride(cfg.ProbeOverride),
 		cfg.MaxNodeLatencyNs,
-	), nil
+	)
+	plat.RelayNodeHash = cfg.RelayNodeHash
+	return plat, nil
 }
 
 func validatePlatformMissAction(raw string) *ServiceError {
@@ -355,6 +372,28 @@ func setPlatformMaxNodeLatency(cfg *platformConfig, d time.Duration) *ServiceErr
 	return nil
 }
 
+// setPlatformRelayNodeHash validates and sets the platform relay node hash.
+// Empty string clears the relay (direct connection). A non-empty value must
+// be a well-formed node hash and must exist in the pool.
+func (s *ControlPlaneService) setPlatformRelayNodeHash(cfg *platformConfig, raw string) *ServiceError {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		cfg.RelayNodeHash = node.Zero
+		return nil
+	}
+	h, err := node.ParseHex(raw)
+	if err != nil {
+		return invalidArg("relay_node_hash: " + err.Error())
+	}
+	if s.Pool != nil {
+		if _, ok := s.Pool.GetEntry(h); !ok {
+			return invalidArg("relay_node_hash: node not found")
+		}
+	}
+	cfg.RelayNodeHash = h
+	return nil
+}
+
 func validatePlatformConfig(cfg *platformConfig, validateRegionFilters bool) *ServiceError {
 	if validateRegionFilters {
 		if err := platform.ValidateRegionFilters(cfg.RegionFilters); err != nil {
@@ -435,6 +474,7 @@ type CreatePlatformRequest struct {
 	AllocationPolicy                 *string                      `json:"allocation_policy"`
 	PassiveCircuitBreakerDisabled    *bool                        `json:"passive_circuit_breaker_disabled"`
 	MaxNodeLatency                   *string                      `json:"max_node_latency"`
+	RelayNodeHash                    *string                      `json:"relay_node_hash"`
 	ProbeOverride                    *model.PlatformProbeOverride `json:"probe_override"`
 }
 
@@ -499,6 +539,11 @@ func (s *ControlPlaneService) CreatePlatform(req CreatePlatformRequest) (*Platfo
 			return nil, invalidArg("max_node_latency: " + err.Error())
 		}
 		if err := setPlatformMaxNodeLatency(&cfg, d); err != nil {
+			return nil, err
+		}
+	}
+	if req.RelayNodeHash != nil {
+		if err := s.setPlatformRelayNodeHash(&cfg, *req.RelayNodeHash); err != nil {
 			return nil, err
 		}
 	}
@@ -629,6 +674,13 @@ func (s *ControlPlaneService) UpdatePlatform(id string, patchJSON json.RawMessag
 		return nil, err
 	} else if ok {
 		if err := setPlatformMaxNodeLatency(&cfg, d); err != nil {
+			return nil, err
+		}
+	}
+	if relay, ok, err := patch.optionalString("relay_node_hash"); err != nil {
+		return nil, err
+	} else if ok {
+		if err := s.setPlatformRelayNodeHash(&cfg, relay); err != nil {
 			return nil, err
 		}
 	}

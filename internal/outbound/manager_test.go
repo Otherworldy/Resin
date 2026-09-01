@@ -441,3 +441,151 @@ func TestFetchWithUserAgent_UsesCustomHeader(t *testing.T) {
 		t.Fatalf("unexpected user-agent: got %q want %q", gotUA, customUA)
 	}
 }
+
+// --- Relay chain tests ---
+
+// chainedBuilder records detour injection and returns a closable outbound.
+type chainedBuilder struct {
+	mu     sync.Mutex
+	builds int
+	detour string
+	ob     *closableOnly
+}
+
+func (b *chainedBuilder) Build(_ json.RawMessage) (adapter.Outbound, error) {
+	return b.build("")
+}
+
+func (b *chainedBuilder) BuildChained(_ json.RawMessage, detourTag string) (adapter.Outbound, error) {
+	return b.build(detourTag)
+}
+
+func (b *chainedBuilder) build(detourTag string) (adapter.Outbound, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.builds++
+	b.detour = detourTag
+	if b.ob == nil {
+		b.ob = &closableOnly{}
+	}
+	return b.ob, nil
+}
+
+func (b *chainedBuilder) count() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.builds
+}
+
+func (b *chainedBuilder) lastDetour() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.detour
+}
+
+func newChainPool(t *testing.T, landingRaw, relayRaw string) (*mockPool, *node.NodeEntry, *node.NodeEntry) {
+	t.Helper()
+	landing := newTestEntry(landingRaw)
+	relay := newTestEntry(relayRaw)
+	pool := &mockPool{}
+	pool.addEntry(landing)
+	pool.addEntry(relay)
+	return pool, landing, relay
+}
+
+func TestEnsureChainedOutbound_BuildsOnceAndCaches(t *testing.T) {
+	pool, landing, relay := newChainPool(t, `{"type":"landing"}`, `{"type":"relay"}`)
+	relayOb := adapter.Outbound(&closableOnly{})
+	relay.Outbound.Store(&relayOb)
+
+	builder := &chainedBuilder{}
+	mgr := NewOutboundManager(pool, builder)
+
+	ob1, err := mgr.EnsureChainedOutbound(landing.Hash, relay.Hash)
+	if err != nil {
+		t.Fatalf("EnsureChainedOutbound: %v", err)
+	}
+	ob2, err := mgr.EnsureChainedOutbound(landing.Hash, relay.Hash)
+	if err != nil {
+		t.Fatalf("EnsureChainedOutbound (cached): %v", err)
+	}
+	if ob1 != ob2 {
+		t.Fatal("expected cached chain outbound to be reused")
+	}
+	if builder.count() != 1 {
+		t.Fatalf("BuildChained calls = %d, want 1", builder.count())
+	}
+	if builder.lastDetour() != RelayTag(relay.Hash) {
+		t.Fatalf("detour tag = %q, want %q", builder.lastDetour(), RelayTag(relay.Hash))
+	}
+}
+
+func TestEnsureChainedOutbound_EnsuresRelayFirst(t *testing.T) {
+	pool, landing, relay := newChainPool(t, `{"type":"landing"}`, `{"type":"relay"}`)
+	// relay has no outbound yet; manager must build it via EnsureNodeOutbound.
+
+	builder := &chainedBuilder{}
+	mgr := NewOutboundManager(pool, builder)
+
+	ob, err := mgr.EnsureChainedOutbound(landing.Hash, relay.Hash)
+	if err != nil {
+		t.Fatalf("EnsureChainedOutbound: %v", err)
+	}
+	if ob == nil {
+		t.Fatal("expected a chain outbound")
+	}
+	if !relay.HasOutbound() {
+		t.Fatal("expected relay outbound to be ensured")
+	}
+}
+
+func TestEnsureChainedOutbound_SelfChainRejected(t *testing.T) {
+	pool, landing, _ := newChainPool(t, `{"type":"landing"}`, `{"type":"relay"}`)
+	mgr := NewOutboundManager(pool, &chainedBuilder{})
+
+	_, err := mgr.EnsureChainedOutbound(landing.Hash, landing.Hash)
+	if err == nil || !strings.Contains(err.Error(), "must differ") {
+		t.Fatalf("expected self-chain rejection, got %v", err)
+	}
+}
+
+func TestEnsureChainedOutbound_RelayMissing(t *testing.T) {
+	pool, landing, _ := newChainPool(t, `{"type":"landing"}`, `{"type":"relay"}`)
+	pool.removeEntry(landing.Hash) // landing missing
+	mgr := NewOutboundManager(pool, &chainedBuilder{})
+	if _, err := mgr.EnsureChainedOutbound(landing.Hash, landing.Hash); err == nil {
+		t.Fatal("expected error for missing landing node")
+	}
+}
+
+func TestEnsureChainedOutbound_RemovedNodeClearsChains(t *testing.T) {
+	pool, landing, relay := newChainPool(t, `{"type":"landing"}`, `{"type":"relay"}`)
+	mgr := NewOutboundManager(pool, &chainedBuilder{})
+
+	_, err := mgr.EnsureChainedOutbound(landing.Hash, relay.Hash)
+	if err != nil {
+		t.Fatalf("EnsureChainedOutbound: %v", err)
+	}
+
+	// Relay node removed: chains touching it must be dropped.
+	pool.removeEntry(relay.Hash)
+	mgr.RemoveNodeOutbound(relay)
+	if _, err := mgr.EnsureChainedOutbound(landing.Hash, relay.Hash); err == nil || !strings.Contains(err.Error(), "relay node not found") {
+		t.Fatalf("expected relay node not found after removal, got %v", err)
+	}
+}
+
+func TestOutboundManager_ResolvesRelayTag(t *testing.T) {
+	pool, _, relay := newChainPool(t, `{"type":"landing"}`, `{"type":"relay"}`)
+	relayOb := adapter.Outbound(&closableOnly{})
+	relay.Outbound.Store(&relayOb)
+	mgr := NewOutboundManager(pool, &chainedBuilder{})
+
+	ob, ok := mgr.Outbound(RelayTag(relay.Hash))
+	if !ok || ob != relayOb {
+		t.Fatal("expected relay tag to resolve to relay outbound")
+	}
+	if _, ok := mgr.Outbound("not-a-relay-tag"); ok {
+		t.Fatal("expected non-relay tag to miss")
+	}
+}

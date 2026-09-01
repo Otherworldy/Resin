@@ -18,6 +18,7 @@ import (
 type tunnelDeps struct {
 	router      *routing.Router
 	pool        outbound.PoolAccessor
+	chains      outbound.ChainedOutboundResolver
 	health      HealthRecorder
 	metricsSink MetricsEventSink
 	bypass      *TargetBypassMatcher
@@ -76,7 +77,7 @@ func prepareConnectTunnel(
 		return prepareDirectConnectTunnel(ctx, deps, target)
 	}
 
-	routed, routeErr := resolveRoutedOutbound(deps.router, deps.pool, platformName, account, target)
+	routed, routeErr := resolveRoutedOutbound(deps.router, deps.pool, deps.chains, platformName, account, target)
 	if routeErr != nil {
 		return tunnelPrepareResult{proxyErr: routeErr}
 	}

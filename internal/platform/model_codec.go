@@ -149,3 +149,17 @@ func BuildFromModel(mp model.Platform) (*Platform, error) {
 		mp.MaxNodeLatencyNs,
 	), nil
 }
+
+// relayHashFromString parses a persisted hex node hash; empty or invalid
+// values degrade to the zero hash (no relay). Persistence-layer validation
+// guarantees well-formed values, so an invalid value is treated as direct.
+func relayHashFromString(raw string) node.Hash {
+	if raw == "" {
+		return node.Zero
+	}
+	h, err := node.ParseHex(raw)
+	if err != nil {
+		return node.Zero
+	}
+	return h
+}

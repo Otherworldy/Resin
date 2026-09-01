@@ -39,6 +39,7 @@ type Socks5InboundConfig struct {
 	ProxyToken       string
 	Router           *routing.Router
 	Pool             outbound.PoolAccessor
+	Chains           outbound.ChainedOutboundResolver
 	Health           HealthRecorder
 	Events           EventEmitter
 	MetricsSink      MetricsEventSink
@@ -70,6 +71,7 @@ func NewSocks5Inbound(cfg Socks5InboundConfig) *Socks5Inbound {
 		tunnel: tunnelDeps{
 			router:      cfg.Router,
 			pool:        cfg.Pool,
+			chains:      cfg.Chains,
 			health:      cfg.Health,
 			metricsSink: cfg.MetricsSink,
 			bypass:      NewTargetBypassMatcher(cfg.ProxyBypassRules),

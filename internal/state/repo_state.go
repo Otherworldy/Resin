@@ -160,8 +160,9 @@ func (r *StateRepo) UpsertPlatform(p model.Platform) error {
 		INSERT INTO platforms (id, name, sticky_ttl_ns, regex_filters_json, region_filters_json,
 		                       reverse_proxy_miss_action, reverse_proxy_empty_account_behavior,
 		                       reverse_proxy_fixed_account_header, allocation_policy,
-		                       passive_circuit_breaker_disabled, probe_override_json, max_node_latency_ns, updated_at_ns)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                       passive_circuit_breaker_disabled, probe_override_json, max_node_latency_ns,
+		                       relay_node_hash, updated_at_ns)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			name                     = excluded.name,
 			sticky_ttl_ns            = excluded.sticky_ttl_ns,
@@ -174,10 +175,11 @@ func (r *StateRepo) UpsertPlatform(p model.Platform) error {
 			passive_circuit_breaker_disabled = excluded.passive_circuit_breaker_disabled,
 			probe_override_json      = excluded.probe_override_json,
 			max_node_latency_ns      = excluded.max_node_latency_ns,
+			relay_node_hash          = excluded.relay_node_hash,
 			updated_at_ns            = excluded.updated_at_ns
 	`, p.ID, p.Name, p.StickyTTLNs, regexFiltersJSON, regionFiltersJSON,
 		p.ReverseProxyMissAction, p.ReverseProxyEmptyAccountBehavior, p.ReverseProxyFixedAccountHeader,
-		p.AllocationPolicy, p.PassiveCircuitBreakerDisabled, probeOverrideJSON, p.MaxNodeLatencyNs, p.UpdatedAtNs)
+		p.AllocationPolicy, p.PassiveCircuitBreakerDisabled, probeOverrideJSON, p.MaxNodeLatencyNs, p.RelayNodeHash, p.UpdatedAtNs)
 	if err != nil {
 		if isSQLiteUniqueConstraint(err) {
 			return fmt.Errorf("%w: platform name already exists", ErrConflict)
@@ -233,7 +235,8 @@ func (r *StateRepo) GetPlatform(id string) (*model.Platform, error) {
 	row := r.db.QueryRow(`SELECT id, name, sticky_ttl_ns, regex_filters_json, region_filters_json,
 			reverse_proxy_miss_action, reverse_proxy_empty_account_behavior,
 			reverse_proxy_fixed_account_header, allocation_policy,
-			passive_circuit_breaker_disabled, probe_override_json, max_node_latency_ns, updated_at_ns
+			passive_circuit_breaker_disabled, probe_override_json, max_node_latency_ns,
+			relay_node_hash, updated_at_ns
 			FROM platforms WHERE id = ?`, id)
 
 	var p model.Platform
@@ -242,7 +245,7 @@ func (r *StateRepo) GetPlatform(id string) (*model.Platform, error) {
 	if err := row.Scan(&p.ID, &p.Name, &p.StickyTTLNs, &regexFiltersJSON,
 		&regionFiltersJSON, &p.ReverseProxyMissAction, &p.ReverseProxyEmptyAccountBehavior,
 		&p.ReverseProxyFixedAccountHeader, &p.AllocationPolicy, &passiveCircuitBreakerDisabled,
-		&probeOverrideJSON, &p.MaxNodeLatencyNs, &p.UpdatedAtNs); err != nil {
+		&probeOverrideJSON, &p.MaxNodeLatencyNs, &p.RelayNodeHash, &p.UpdatedAtNs); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, ErrNotFound
 		}
@@ -271,7 +274,7 @@ func (r *StateRepo) GetPlatform(id string) (*model.Platform, error) {
 
 // ListPlatforms returns all platforms.
 func (r *StateRepo) ListPlatforms() ([]model.Platform, error) {
-	rows, err := r.db.Query("SELECT id, name, sticky_ttl_ns, regex_filters_json, region_filters_json, reverse_proxy_miss_action, reverse_proxy_empty_account_behavior, reverse_proxy_fixed_account_header, allocation_policy, passive_circuit_breaker_disabled, probe_override_json, max_node_latency_ns, updated_at_ns FROM platforms")
+	rows, err := r.db.Query("SELECT id, name, sticky_ttl_ns, regex_filters_json, region_filters_json, reverse_proxy_miss_action, reverse_proxy_empty_account_behavior, reverse_proxy_fixed_account_header, allocation_policy, passive_circuit_breaker_disabled, probe_override_json, max_node_latency_ns, relay_node_hash, updated_at_ns FROM platforms")
 	if err != nil {
 		return nil, err
 	}
@@ -285,7 +288,7 @@ func (r *StateRepo) ListPlatforms() ([]model.Platform, error) {
 		if err := rows.Scan(&p.ID, &p.Name, &p.StickyTTLNs, &regexFiltersJSON,
 			&regionFiltersJSON, &p.ReverseProxyMissAction, &p.ReverseProxyEmptyAccountBehavior,
 			&p.ReverseProxyFixedAccountHeader, &p.AllocationPolicy, &passiveCircuitBreakerDisabled,
-			&probeOverrideJSON, &p.MaxNodeLatencyNs, &p.UpdatedAtNs); err != nil {
+			&probeOverrideJSON, &p.MaxNodeLatencyNs, &p.RelayNodeHash, &p.UpdatedAtNs); err != nil {
 			return nil, err
 		}
 		p.PassiveCircuitBreakerDisabled = passiveCircuitBreakerDisabled != 0

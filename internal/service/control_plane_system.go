@@ -102,6 +102,7 @@ var platformPatchAllowedFields = map[string]bool{
 	"allocation_policy":                    true,
 	"passive_circuit_breaker_disabled":     true,
 	"max_node_latency":                     true,
+	"relay_node_hash":                      true,
 	"probe_override":                       true,
 }
 

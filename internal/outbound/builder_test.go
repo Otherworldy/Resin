@@ -922,3 +922,30 @@ func TestRemoveNodeOutbound_Closes(t *testing.T) {
 		t.Fatal("expected outbound to be nil after RemoveNodeOutbound")
 	}
 }
+
+func TestSingboxBuilder_BuildChained_InjectsDetour(t *testing.T) {
+	b := newTestSingboxBuilder(t)
+	defer b.Close()
+
+	relay := newTestEntry(`{"type":"relay"}`)
+	relayOb := adapter.Outbound(&closableOnly{})
+	relay.Outbound.Store(&relayOb)
+	pool := &mockPool{}
+	pool.addEntry(relay)
+	mgr := NewOutboundManager(pool, &testutil.StubOutboundBuilder{})
+	b.SetRelayManager(mgr)
+
+	raw := []byte(`{"type":"shadowsocks","tag":"landing","server":"127.0.0.1","server_port":1,"method":"aes-128-gcm","password":"test"}`)
+	ob, err := b.BuildChained(raw, RelayTag(relay.Hash))
+	if err != nil {
+		t.Fatalf("BuildChained: %v", err)
+	}
+	defer closeOutbound(ob)
+	if ob.Type() != "shadowsocks" {
+		t.Fatalf("outbound type: got %q, want shadowsocks", ob.Type())
+	}
+	deps := ob.Dependencies()
+	if len(deps) != 1 || deps[0] != RelayTag(relay.Hash) {
+		t.Fatalf("unexpected dependencies: %v, want [%s]", deps, RelayTag(relay.Hash))
+	}
+}

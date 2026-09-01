@@ -22,6 +22,7 @@ export type Platform = {
   allocation_policy: PlatformAllocationPolicy;
   passive_circuit_breaker_disabled: boolean;
   max_node_latency: string;
+  relay_node_hash: string;
   probe_override?: PlatformProbeOverride | null;
   updated_at: string;
 };
@@ -44,6 +45,7 @@ export type PlatformCreateInput = {
   allocation_policy?: PlatformAllocationPolicy;
   passive_circuit_breaker_disabled?: boolean;
   max_node_latency?: string;
+  relay_node_hash?: string;
   probe_override?: PlatformProbeOverride;
 };
 
@@ -58,6 +60,7 @@ export type PlatformUpdateInput = {
   allocation_policy?: PlatformAllocationPolicy;
   passive_circuit_breaker_disabled?: boolean;
   max_node_latency?: string;
+  relay_node_hash?: string;
   probe_override?: PlatformProbeOverride;
 };
 

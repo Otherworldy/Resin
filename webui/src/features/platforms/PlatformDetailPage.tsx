@@ -47,6 +47,7 @@ import {
 import { PlatformAccessPanel } from "./PlatformAccessPanel";
 import { PlatformMonitorPanel } from "./PlatformMonitorPanel";
 import { ProbeOverrideFields } from "./ProbeOverrideFields";
+import { listNodes } from "../nodes/api";
 import type { PlatformLease } from "./types";
 
 type PlatformDetailTab = "monitor" | "access" | "config" | "ops";
@@ -128,6 +129,13 @@ export function PlatformDetailPage() {
     defaultValues: defaultPlatformFormValues,
   });
   const detailEmptyAccountBehavior = editForm.watch("reverse_proxy_empty_account_behavior");
+
+  const relayNodesQuery = useQuery({
+    queryKey: ["nodes", "relay-options"],
+    queryFn: () => listNodes({ has_outbound: true, enabled: true, limit: 500, sort_by: "tag" }),
+    staleTime: 60_000,
+  });
+  const relayNodes = relayNodesQuery.data?.items ?? [];
 
   useEffect(() => {
     if (!platform) {
@@ -573,6 +581,23 @@ export function PlatformDetailPage() {
                     ) : null}
                     <p className="muted" style={{ marginTop: 4, fontSize: 12 }}>
                       {t("参考延迟（权威域名平均 EWMA）超过该值的节点不参与转发；留空或 0s 表示不限制。")}
+                    </p>
+                  </div>
+
+                  <div className="field-group">
+                    <label className="field-label" htmlFor="detail-edit-relay">
+                      {t("中转节点（可选）")}
+                    </label>
+                    <Select id="detail-edit-relay" {...editForm.register("relay_node_hash")}>
+                      <option value="">{t("直连（不使用中转节点）")}</option>
+                      {relayNodes.map((item) => (
+                        <option key={item.node_hash} value={item.node_hash}>
+                          {item.display_tag || item.node_hash}
+                        </option>
+                      ))}
+                    </Select>
+                    <p className="muted" style={{ marginTop: 4, fontSize: 12 }}>
+                      {t("选中后，代理流量先经中转节点、再由路由选中的落地节点出站；留空表示直连。")}
                     </p>
                   </div>
 

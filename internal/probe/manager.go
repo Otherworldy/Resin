@@ -20,6 +20,21 @@ import (
 // response body and TLS handshake latency. This is injectable for testing.
 type Fetcher func(hash node.Hash, url string) (body []byte, latency time.Duration, err error)
 
+// RelayChainFetcher executes an HTTP request through a relay→landing chain
+// (中转→落地). Injectable for testing.
+type RelayChainFetcher func(relay, landing node.Hash, url string) (body []byte, latency time.Duration, err error)
+
+// RelayChainRecorder records chain probe results. Implemented by
+// topology.GlobalNodePool.
+type RelayChainRecorder interface {
+	RecordChainResult(relay, landing node.Hash, success bool)
+	RecordChainLatency(relay, landing node.Hash, rawTarget string, latency *time.Duration)
+	SetChainEgressIP(relay, landing node.Hash, ip *netip.Addr, loc *string)
+	ChainEgressDue(relay, landing node.Hash, maxInterval time.Duration) bool
+	ChainLatencyDue(relay, landing node.Hash, maxInterval time.Duration) bool
+	ChainStateUpdated(relay, landing node.Hash)
+}
+
 // ProbeConfig configures the ProbeManager.
 // Field names align 1:1 with RuntimeConfig to prevent mis-wiring.
 type ProbeConfig struct {
@@ -43,6 +58,13 @@ type ProbeConfig struct {
 	// ResolvePlatformProbe resolves a node hash to its platform-level probe
 	// override. Nil means all nodes use global probe configuration.
 	ResolvePlatformProbe func(hash node.Hash) PlatformProbeConfig
+
+	// Relay chain probing (平台中转链探测). All three must be set to enable.
+	// Target collection, chain fetcher and recorder are wired from the topology
+	// pool by the caller; chain states never touch the node's direct state.
+	RelayChainFetcher  RelayChainFetcher
+	RelayChainTargets  func() []topology.RelayChainTarget
+	RelayChainRecorder RelayChainRecorder
 
 	// OnProbeEvent is called after each probe attempt completes (egress or latency).
 	// The kind parameter is "egress" or "latency".
@@ -72,6 +94,9 @@ type ProbeManager struct {
 	latencyTestURL                  func() string
 	latencyAuthorities              func() []string
 	resolvePlatformProbe            func(hash node.Hash) PlatformProbeConfig
+	relayChainFetcher               RelayChainFetcher
+	relayChainTargets               func() []topology.RelayChainTarget
+	relayChainRecorder              RelayChainRecorder
 	onProbeEvent                    func(kind string)
 }
 
@@ -106,8 +131,9 @@ const (
 )
 
 type probeTaskKey struct {
-	hash node.Hash
-	kind probeTaskKind
+	hash  node.Hash
+	relay node.Hash // zero = node direct probe; non-zero = relay chain probe
+	kind  probeTaskKind
 }
 
 type probeTask struct {
@@ -284,6 +310,9 @@ func NewProbeManager(cfg ProbeConfig) *ProbeManager {
 		latencyTestURL:                  cfg.LatencyTestURL,
 		latencyAuthorities:              cfg.LatencyAuthorities,
 		resolvePlatformProbe:            cfg.ResolvePlatformProbe,
+		relayChainFetcher:               cfg.RelayChainFetcher,
+		relayChainTargets:               cfg.RelayChainTargets,
+		relayChainRecorder:              cfg.RelayChainRecorder,
 		onProbeEvent:                    cfg.OnProbeEvent,
 	}
 }
@@ -311,6 +340,12 @@ func (m *ProbeManager) Start() {
 	go func() {
 		defer m.wg.Done()
 		scanloop.Run(m.stopCh, scanloop.DefaultMinInterval, scanloop.DefaultJitterRange, m.scanLatency)
+	}()
+
+	m.wg.Add(1)
+	go func() {
+		defer m.wg.Done()
+		scanloop.Run(m.stopCh, scanloop.DefaultMinInterval, scanloop.DefaultJitterRange, m.scanRelayChains)
 	}()
 
 	for i := 0; i < m.workerCount; i++ {
@@ -584,6 +619,40 @@ func (m *ProbeManager) scanLatency() {
 	})
 }
 
+// scanRelayChains enqueues chain probes (relay→landing) that are due.
+// Chain probe targets come from platforms that configure a relay (中转);
+// their health is recorded on chain states, never on the node direct state.
+func (m *ProbeManager) scanRelayChains() {
+	if m.relayChainTargets == nil || m.relayChainFetcher == nil || m.relayChainRecorder == nil {
+		return
+	}
+	egressInterval := 24 * time.Hour
+	if m.maxEgressTestInterval != nil {
+		egressInterval = m.maxEgressTestInterval()
+	}
+	latencyInterval := 1 * time.Hour
+	if m.maxLatencyTestInterval != nil {
+		latencyInterval = m.maxLatencyTestInterval()
+	}
+	if egressInterval <= 0 && latencyInterval <= 0 {
+		return
+	}
+
+	for _, target := range m.relayChainTargets() {
+		select {
+		case <-m.stopCh:
+			return
+		default:
+		}
+		if egressInterval > 0 && m.relayChainRecorder.ChainEgressDue(target.Relay, target.Landing, egressInterval) {
+			m.enqueueProbeRelay(target.Relay, target.Landing, probeTaskKindEgress, probePriorityNormal)
+		}
+		if latencyInterval > 0 && m.relayChainRecorder.ChainLatencyDue(target.Relay, target.Landing, latencyInterval) {
+			m.enqueueProbeRelay(target.Relay, target.Landing, probeTaskKindLatency, probePriorityNormal)
+		}
+	}
+}
+
 func (m *ProbeManager) runProbeWorker() {
 	for {
 		task, ok := m.taskQueue.Dequeue()
@@ -602,6 +671,11 @@ func (m *ProbeManager) runProbeWorker() {
 }
 
 func (m *ProbeManager) executeTask(task probeTask) {
+	if !task.key.relay.IsZero() {
+		m.executeRelayChainTask(task.key.relay, task.key.hash, task.key.kind)
+		return
+	}
+
 	entry, ok := m.pool.GetEntry(task.key.hash)
 	if !ok || entry.Outbound.Load() == nil {
 		return
@@ -619,7 +693,11 @@ func (m *ProbeManager) executeTask(task probeTask) {
 }
 
 func (m *ProbeManager) enqueueProbe(hash node.Hash, kind probeTaskKind, priority probePriority) bool {
-	key := probeTaskKey{hash: hash, kind: kind}
+	return m.enqueueProbeRelay(node.Zero, hash, kind, priority)
+}
+
+func (m *ProbeManager) enqueueProbeRelay(relay, hash node.Hash, kind probeTaskKind, priority probePriority) bool {
+	key := probeTaskKey{hash: hash, relay: relay, kind: kind}
 	state, _ := m.taskStates.LoadOrCompute(key, func() (*probeTaskState, bool) {
 		return &probeTaskState{}, false
 	})
@@ -819,6 +897,7 @@ func (m *ProbeManager) probeEgress(hash node.Hash, entry *node.NodeEntry) {
 
 	_, stage, err := m.performEgressProbe(hash)
 	if err != nil {
+		entry.SetLastError("egress probe: " + err.Error())
 		if stage == egressProbeParseError {
 			log.Printf("[probe] parse egress IP for %s: %v", hash.Hex(), err)
 			return
@@ -845,6 +924,7 @@ func (m *ProbeManager) probeLatency(hash node.Hash, entry *node.NodeEntry, testU
 	}
 
 	if err := m.performLatencyProbe(hash, testURL); err != nil {
+		entry.SetLastError("latency probe: " + err.Error())
 		log.Printf("[probe] latency probe failed for %s: %v", hash.Hex(), err)
 		return
 	}
@@ -896,4 +976,71 @@ func (m *ProbeManager) currentLatencyTestURL() string {
 		testURL = m.latencyTestURL()
 	}
 	return testURL
+}
+
+// executeRelayChainTask dispatches a relay chain probe task.
+func (m *ProbeManager) executeRelayChainTask(relay, landing node.Hash, kind probeTaskKind) {
+	switch kind {
+	case probeTaskKindEgress:
+		m.performRelayEgressProbe(relay, landing)
+	case probeTaskKindLatency:
+		m.performRelayLatencyProbe(relay, landing)
+	}
+}
+
+// performRelayEgressProbe probes a relay→landing chain (egress IP + latency)
+// and records the result on the chain state.
+func (m *ProbeManager) performRelayEgressProbe(relay, landing node.Hash) {
+	if m.relayChainFetcher == nil || m.relayChainRecorder == nil {
+		return
+	}
+	if m.onProbeEvent != nil {
+		m.onProbeEvent("egress")
+	}
+
+	body, latency, err := m.relayChainFetcher(relay, landing, egressTraceURL)
+	if err != nil {
+		m.relayChainRecorder.RecordChainResult(relay, landing, false)
+		m.relayChainRecorder.SetChainEgressIP(relay, landing, nil, nil)
+		log.Printf("[probe] relay chain egress probe failed for %s->%s: %v", relay.Hex(), landing.Hex(), err)
+		return
+	}
+
+	m.relayChainRecorder.RecordChainResult(relay, landing, true)
+	if latency > 0 {
+		m.relayChainRecorder.RecordChainLatency(relay, landing, egressTraceDomain, &latency)
+	}
+
+	ip, loc, err := ParseCloudflareTrace(body)
+	if err != nil {
+		m.relayChainRecorder.SetChainEgressIP(relay, landing, nil, nil)
+		log.Printf("[probe] parse chain egress IP for %s->%s: %v", relay.Hex(), landing.Hex(), err)
+		return
+	}
+	m.relayChainRecorder.SetChainEgressIP(relay, landing, &ip, loc)
+	m.relayChainRecorder.ChainStateUpdated(relay, landing)
+}
+
+// performRelayLatencyProbe probes latency through a relay→landing chain and
+// records it on the chain state.
+func (m *ProbeManager) performRelayLatencyProbe(relay, landing node.Hash) {
+	if m.relayChainFetcher == nil || m.relayChainRecorder == nil {
+		return
+	}
+	if m.onProbeEvent != nil {
+		m.onProbeEvent("latency")
+	}
+
+	testURL := m.currentLatencyTestURL()
+	domain := netutil.ExtractDomain(testURL)
+	_, latency, err := m.relayChainFetcher(relay, landing, testURL)
+	if err != nil {
+		m.relayChainRecorder.RecordChainResult(relay, landing, false)
+		m.relayChainRecorder.RecordChainLatency(relay, landing, domain, nil)
+		log.Printf("[probe] relay chain latency probe failed for %s->%s: %v", relay.Hex(), landing.Hex(), err)
+		return
+	}
+	m.relayChainRecorder.RecordChainResult(relay, landing, true)
+	m.relayChainRecorder.RecordChainLatency(relay, landing, domain, &latency)
+	m.relayChainRecorder.ChainStateUpdated(relay, landing)
 }

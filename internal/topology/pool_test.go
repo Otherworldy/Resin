@@ -950,3 +950,139 @@ func TestEphemeralCleaner_SkipsRecentCircuitBreak(t *testing.T) {
 		t.Fatal("recently circuit-broken node should not be evicted yet")
 	}
 }
+
+// --- Relay chain states ---
+
+func TestPool_ChainStateLifecycle(t *testing.T) {
+	subMgr := NewSubscriptionManager()
+	sub := subscription.NewSubscription("sub-chain", "sub-chain", "https://example.com", true, false)
+	subMgr.Register(sub)
+	pool := newTestPool(subMgr)
+
+	relayRaw := `{"type":"ss","server":"1.1.1.1","port":443}`
+	relayHash := node.HashFromRawOptions([]byte(relayRaw))
+	landingRaw := `{"type":"ss","server":"9.9.9.9","port":443}`
+	landingHash := node.HashFromRawOptions([]byte(landingRaw))
+	mn := subscription.NewManagedNodes()
+	mn.StoreNode(relayHash, subscription.ManagedNode{Tags: []string{"relay"}})
+	mn.StoreNode(landingHash, subscription.ManagedNode{Tags: []string{"landing"}})
+	sub.SwapManagedNodes(mn)
+	pool.AddNodeFromSub(relayHash, json.RawMessage(relayRaw), sub.ID)
+	pool.AddNodeFromSub(landingHash, json.RawMessage(landingRaw), sub.ID)
+
+	// Due when never probed.
+	if !pool.ChainEgressDue(relayHash, landingHash, time.Minute) {
+		t.Fatal("unprobed chain should be due")
+	}
+
+	// Record a successful egress probe.
+	ip := netip.MustParseAddr("5.6.7.8")
+	pool.SetChainEgressIP(relayHash, landingHash, &ip, nil)
+	if !pool.ChainEgressDue(relayHash, landingHash, time.Nanosecond) {
+		t.Fatal("chain should be due again after interval elapsed")
+	}
+	if pool.ChainEgressDue(relayHash, landingHash, 24*time.Hour) {
+		t.Fatal("freshly probed chain should not be due")
+	}
+
+	// Failure count opens the chain circuit at threshold (3).
+	for i := 0; i < 3; i++ {
+		pool.RecordChainResult(relayHash, landingHash, false)
+	}
+	state := pool.ChainStateFor(relayHash, landingHash)
+	if !state.IsCircuitOpen() {
+		t.Fatal("expected chain circuit to open after 3 failures")
+	}
+	// Success closes it.
+	pool.RecordChainResult(relayHash, landingHash, true)
+	if state.IsCircuitOpen() || state.FailureCount.Load() != 0 {
+		t.Fatal("expected chain circuit to close after success")
+	}
+
+	// Latency recording populates the chain table.
+	lat := 40 * time.Millisecond
+	pool.RecordChainLatency(relayHash, landingHash, "https://example.com/x", &lat)
+	if !state.HasLatency() {
+		t.Fatal("expected chain latency table to be populated")
+	}
+}
+
+func TestPool_RelayChainTargets_CollectsMatchingNodes(t *testing.T) {
+	subMgr := NewSubscriptionManager()
+	sub := subscription.NewSubscription("sub-chain", "sub-chain", "https://example.com", true, false)
+	subMgr.Register(sub)
+	pool := newTestPool(subMgr)
+
+	relayRaw := `{"type":"ss","server":"1.1.1.1","port":443}`
+	relayHash := node.HashFromRawOptions([]byte(relayRaw))
+	matchRaw := `{"type":"ss","server":"9.9.9.9","port":443}`
+	matchHash := node.HashFromRawOptions([]byte(matchRaw))
+	otherRaw := `{"type":"ss","server":"8.8.8.8","port":443}`
+	otherHash := node.HashFromRawOptions([]byte(otherRaw))
+	mn := subscription.NewManagedNodes()
+	mn.StoreNode(relayHash, subscription.ManagedNode{Tags: []string{"relay-tag"}})
+	mn.StoreNode(matchHash, subscription.ManagedNode{Tags: []string{"landing-tag"}})
+	mn.StoreNode(otherHash, subscription.ManagedNode{Tags: []string{"other-tag"}})
+	sub.SwapManagedNodes(mn)
+	pool.AddNodeFromSub(relayHash, json.RawMessage(relayRaw), "sub-chain")
+	pool.AddNodeFromSub(matchHash, json.RawMessage(matchRaw), "sub-chain")
+	pool.AddNodeFromSub(otherHash, json.RawMessage(otherRaw), "sub-chain")
+
+	filter, err := platform.CompileRegexFilters([]string{"landing"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plat := platform.NewPlatformWithTagFilter("p-chain", "P", filter, nil)
+	plat.RelayNodeHash = relayHash
+	pool.RegisterPlatform(plat)
+
+	targets := pool.RelayChainTargets()
+	if len(targets) != 1 {
+		t.Fatalf("expected 1 chain target, got %d: %+v", len(targets), targets)
+	}
+	if targets[0].Relay != relayHash || targets[0].Landing != matchHash {
+		t.Fatalf("unexpected target: %+v", targets[0])
+	}
+}
+
+func TestPool_RecordPassiveResult_PlatformRelayRoutesToChainState(t *testing.T) {
+	subMgr := NewSubscriptionManager()
+	sub := subscription.NewSubscription("sub-chain", "sub-chain", "https://example.com", true, false)
+	subMgr.Register(sub)
+	pool := newTestPool(subMgr)
+
+	relayRaw := `{"type":"ss","server":"1.1.1.1","port":443}`
+	relayHash := node.HashFromRawOptions([]byte(relayRaw))
+	landingRaw := `{"type":"ss","server":"9.9.9.9","port":443}`
+	landingHash := node.HashFromRawOptions([]byte(landingRaw))
+	mn := subscription.NewManagedNodes()
+	mn.StoreNode(relayHash, subscription.ManagedNode{Tags: []string{"relay"}})
+	mn.StoreNode(landingHash, subscription.ManagedNode{Tags: []string{"landing"}})
+	sub.SwapManagedNodes(mn)
+	pool.AddNodeFromSub(relayHash, json.RawMessage(relayRaw), "sub-chain")
+	pool.AddNodeFromSub(landingHash, json.RawMessage(landingRaw), "sub-chain")
+
+	plat := platform.NewPlatform("p-chain", "P", nil, nil)
+	plat.RelayNodeHash = relayHash
+	pool.RegisterPlatform(plat)
+	if err := pool.ReplacePlatform(plat); err != nil {
+		t.Fatal(err)
+	}
+
+	// Passive failure on a relay platform must NOT touch the node's direct state.
+	pool.RecordPassiveResult("p-chain", landingHash, false)
+	landingEntry, _ := pool.GetEntry(landingHash)
+	if landingEntry.FailureCount.Load() != 0 {
+		t.Fatalf("relay-platform passive failure must not affect the node's direct state, failure=%d", landingEntry.FailureCount.Load())
+	}
+	chain := pool.ChainStateFor(relayHash, landingHash)
+	if chain.FailureCount.Load() != 1 {
+		t.Fatalf("expected chain failure count 1, got %d", chain.FailureCount.Load())
+	}
+
+	// Platform without relay still records on the node.
+	pool.RecordPassiveResult("no-such-platform", landingHash, false)
+	if landingEntry.FailureCount.Load() != 1 {
+		t.Fatalf("expected direct failure count 1, got %d", landingEntry.FailureCount.Load())
+	}
+}

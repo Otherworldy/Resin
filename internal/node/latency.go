@@ -337,7 +337,16 @@ func tdEWMAUpdate(
 // AverageEWMAForDomainsMs returns the average EWMA latency in milliseconds
 // across domains that exist in the node's latency table.
 func AverageEWMAForDomainsMs(entry *NodeEntry, domains []string) (float64, bool) {
-	if entry == nil || entry.LatencyTable == nil || entry.LatencyTable.Size() == 0 || len(domains) == 0 {
+	if entry == nil {
+		return 0, false
+	}
+	return AverageEWMAForTableMs(entry.LatencyTable, domains)
+}
+
+// AverageEWMAForTableMs computes the average EWMA (milliseconds) for the given
+// authority domains across a latency table. Used by chain states.
+func AverageEWMAForTableMs(table *LatencyTable, domains []string) (float64, bool) {
+	if table == nil || table.Size() == 0 || len(domains) == 0 {
 		return 0, false
 	}
 
@@ -348,7 +357,7 @@ func AverageEWMAForDomainsMs(entry *NodeEntry, domains []string) (float64, bool)
 		if domain == "" {
 			continue
 		}
-		stats, ok := entry.LatencyTable.GetDomainStats(domain)
+		stats, ok := table.GetDomainStats(domain)
 		if !ok {
 			continue
 		}

@@ -62,9 +62,11 @@ type RouteResult struct {
 	PlatformID   string
 	PlatformName string
 	NodeHash     node.Hash
-	EgressIP     netip.Addr
-	NodeTag      string // display tag: "<Subscription>/<Tag>" (DESIGN.md §601)
-	LeaseCreated bool
+	// RelayNodeHash is the platform-configured relay node; zero means direct.
+	RelayNodeHash node.Hash
+	EgressIP      netip.Addr
+	NodeTag       string // display tag: "<Subscription>/<Tag>" (DESIGN.md §601)
+	LeaseCreated  bool
 }
 
 const livePickAttempts = 2 // first pick + one retry
@@ -104,6 +106,7 @@ func (r *Router) RouteRequest(platName, account, target string) (RouteResult, er
 func withPlatformContext(plat *platform.Platform, res RouteResult) RouteResult {
 	res.PlatformID = plat.ID
 	res.PlatformName = plat.Name
+	res.RelayNodeHash = plat.RelayNodeHash
 	return res
 }
 

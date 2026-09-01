@@ -20,6 +20,7 @@ type ForwardProxyConfig struct {
 	ProxyToken        string
 	Router            *routing.Router
 	Pool              outbound.PoolAccessor
+	Chains            outbound.ChainedOutboundResolver
 	Health            HealthRecorder
 	Events            EventEmitter
 	MetricsSink       MetricsEventSink
@@ -34,6 +35,7 @@ type ForwardProxy struct {
 	token             string
 	router            *routing.Router
 	pool              outbound.PoolAccessor
+	chains            outbound.ChainedOutboundResolver
 	health            HealthRecorder
 	events            EventEmitter
 	metricsSink       MetricsEventSink
@@ -60,6 +62,7 @@ func NewForwardProxy(cfg ForwardProxyConfig) *ForwardProxy {
 		token:           cfg.ProxyToken,
 		router:          cfg.Router,
 		pool:            cfg.Pool,
+		chains:          cfg.Chains,
 		health:          cfg.Health,
 		events:          ev,
 		metricsSink:     cfg.MetricsSink,
@@ -75,7 +78,7 @@ func (p *ForwardProxy) outboundHTTPTransport(routed routedOutbound) *http.Transp
 			p.transportPool = NewOutboundTransportPool(p.transportConfig)
 		}
 	})
-	return p.transportPool.Get(routed.Route.NodeHash, routed.Outbound, p.metricsSink)
+	return p.transportPool.Get(routed.transportKey(), routed.Outbound, p.metricsSink)
 }
 
 func (p *ForwardProxy) directHTTPTransport() *http.Transport {
@@ -232,7 +235,7 @@ func (p *ForwardProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	if p.bypass != nil && p.bypass.ShouldBypass(r.Host) {
 		transport = p.directHTTPTransport()
 	} else {
-		routed, routeErr := resolveRoutedOutbound(p.router, p.pool, platName, account, r.Host)
+		routed, routeErr := resolveRoutedOutbound(p.router, p.pool, p.chains, platName, account, r.Host)
 		if routeErr != nil {
 			lifecycle.setProxyError(routeErr)
 			lifecycle.setHTTPStatus(routeErr.HTTPCode)

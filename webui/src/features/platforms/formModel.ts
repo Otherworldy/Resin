@@ -39,6 +39,7 @@ export const platformFormSchema = z.object({
   allocation_policy: z.enum(allocationPolicies),
   passive_circuit_breaker_disabled: z.boolean(),
   max_node_latency: z.string().optional(),
+  relay_node_hash: z.string().optional(),
   probe_disabled: z.boolean(),
   probe_latency_interval: z.string().optional(),
   probe_egress_interval: z.string().optional(),
@@ -90,6 +91,7 @@ export const defaultPlatformFormValues: PlatformFormValues = {
   allocation_policy: "BALANCED",
   passive_circuit_breaker_disabled: false,
   max_node_latency: "",
+  relay_node_hash: "",
   probe_disabled: false,
   probe_latency_interval: "",
   probe_egress_interval: "",
@@ -111,6 +113,7 @@ export function platformToFormValues(platform: Platform): PlatformFormValues {
     allocation_policy: platform.allocation_policy,
     passive_circuit_breaker_disabled: platform.passive_circuit_breaker_disabled,
     max_node_latency: platform.max_node_latency === "0s" ? "" : platform.max_node_latency,
+    relay_node_hash: platform.relay_node_hash ?? "",
     probe_disabled: platform.probe_override?.disabled ?? false,
     probe_latency_interval: platform.probe_override?.latency_probe_interval_ns
       ? formatNsAsGoDuration(platform.probe_override.latency_probe_interval_ns)
@@ -189,6 +192,7 @@ function toPlatformPayloadBase(values: PlatformFormValues) {
     allocation_policy: values.allocation_policy,
     passive_circuit_breaker_disabled: values.passive_circuit_breaker_disabled,
     max_node_latency: values.max_node_latency?.trim() || "0s",
+    relay_node_hash: values.relay_node_hash?.trim() || "",
     // 空对象代表清除平台探测覆盖（回退到全局探测配置）。
     probe_override: Object.keys(probeOverride).length > 0 ? probeOverride : {},
   };

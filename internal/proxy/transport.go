@@ -37,12 +37,20 @@ func normalizeOutboundTransportConfig(cfg OutboundTransportConfig) OutboundTrans
 	return cfg
 }
 
-// OutboundTransportPool manages reusable outbound HTTP transports keyed by node hash.
-// A single instance should be shared by forward/reverse proxies so keep-alive pools
-// are reused and can be evicted on node removal.
+// TransportKey identifies one outbound path (landing node + optional relay
+// node) so transports are never shared across different relay routes.
+type TransportKey struct {
+	NodeHash  node.Hash
+	RelayHash node.Hash // zero = direct
+}
+
+// OutboundTransportPool manages reusable outbound HTTP transports keyed by
+// transport path (landing + relay). A single instance should be shared by
+// forward/reverse proxies so keep-alive pools are reused and can be evicted
+// on node removal.
 type OutboundTransportPool struct {
 	config     OutboundTransportConfig
-	transports *xsync.Map[node.Hash, *http.Transport]
+	transports *xsync.Map[TransportKey, *http.Transport]
 }
 
 func newOutboundTransportPool() *OutboundTransportPool {
@@ -57,34 +65,39 @@ func newOutboundTransportPoolWithConfig(cfg OutboundTransportConfig) *OutboundTr
 func NewOutboundTransportPool(cfg OutboundTransportConfig) *OutboundTransportPool {
 	return &OutboundTransportPool{
 		config:     normalizeOutboundTransportConfig(cfg),
-		transports: xsync.NewMap[node.Hash, *http.Transport](),
+		transports: xsync.NewMap[TransportKey, *http.Transport](),
 	}
 }
 
-// Get returns a reusable transport for the given node hash.
+// Get returns a reusable transport for the given path (landing + relay).
 func (p *OutboundTransportPool) Get(
-	hash node.Hash,
+	key TransportKey,
 	ob adapter.Outbound,
 	sink MetricsEventSink,
 ) *http.Transport {
-	transport, _ := p.transports.LoadOrCompute(hash, func() (*http.Transport, bool) {
+	transport, _ := p.transports.LoadOrCompute(key, func() (*http.Transport, bool) {
 		return p.newReusableOutboundTransport(ob, sink), false
 	})
 	return transport
 }
 
-// Evict closes idle connections for one node transport and removes it from pool.
+// Evict closes idle connections for all transports touching the node (as
+// landing or relay) and removes them from the pool.
 func (p *OutboundTransportPool) Evict(hash node.Hash) {
-	transport, ok := p.transports.LoadAndDelete(hash)
-	if !ok || transport == nil {
-		return
-	}
-	transport.CloseIdleConnections()
+	p.transports.DeleteMatching(func(key TransportKey, transport *http.Transport) (bool, bool) {
+		if key.NodeHash != hash && key.RelayHash != hash {
+			return false, false
+		}
+		if transport != nil {
+			transport.CloseIdleConnections()
+		}
+		return true, false
+	})
 }
 
 // CloseAll closes idle connections and clears all pooled transports.
 func (p *OutboundTransportPool) CloseAll() {
-	p.transports.Range(func(_ node.Hash, transport *http.Transport) bool {
+	p.transports.Range(func(_ TransportKey, transport *http.Transport) bool {
 		if transport != nil {
 			transport.CloseIdleConnections()
 		}

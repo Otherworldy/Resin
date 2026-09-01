@@ -21,6 +21,7 @@ import type {
   SnapshotPlatformNodePool,
   TimeWindow,
 } from "../dashboard/types";
+import { getNode } from "../nodes/api";
 import type { Platform } from "./types";
 
 type RangeKey = "1h" | "6h" | "24h";
@@ -792,6 +793,16 @@ export function PlatformMonitorPanel({ platform }: { platform: Platform }) {
   const snapshotNodePool = snapshotQuery.data?.nodePool;
   const snapshotLatency = snapshotQuery.data?.nodeLatency;
 
+  // Relay (中转) node label: when the platform routes through a relay, its
+  // routable nodes are probed through the relay chain; show which relay.
+  const relayHash = platform.relay_node_hash?.trim() ?? "";
+  const relayNodeQuery = useQuery({
+    queryKey: ["nodes", "relay-node", relayHash],
+    queryFn: () => getNode(relayHash),
+    enabled: Boolean(relayHash),
+    staleTime: 60_000,
+  });
+
   const leaseTrendData = useMemo(() => {
     return downsampleArray(sortedRealtimeItems, MAX_TREND_POINTS).map((item) => ({
       label: formatClock(item.ts),
@@ -886,7 +897,15 @@ export function PlatformMonitorPanel({ platform }: { platform: Platform }) {
           <div>
             <p className="platform-monitor-kpi-label">{t("可路由节点")}</p>
             <p className="platform-monitor-kpi-value">{formatCount(snapshotNodePool?.routable_node_count ?? 0)}</p>
-            <p className="platform-monitor-kpi-sub">{t("出口 IP")} {formatCount(snapshotNodePool?.egress_ip_count ?? 0)}</p>
+            <p className="platform-monitor-kpi-sub">
+              {relayHash
+                ? t("经中转探测：{{relay}}", {
+                    relay: relayNodeQuery.data?.display_tag || relayHash,
+                  })
+                : t("直连探测")}
+              {" · "}
+              {t("出口 IP")} {formatCount(snapshotNodePool?.egress_ip_count ?? 0)}
+            </p>
           </div>
           <Link to={`/nodes?platform_id=${encodeURIComponent(platform.id)}`} className="platform-monitor-kpi-link">
             <Link2 size={14} />

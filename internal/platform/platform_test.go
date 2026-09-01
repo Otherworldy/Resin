@@ -403,3 +403,65 @@ func TestPlatform_EvaluateNode_MaxNodeLatency_NoAuthorities(t *testing.T) {
 		t.Fatalf("expected 1 routable node, got %d", p.View().Size())
 	}
 }
+
+func TestPlatform_EvaluateNode_ExcludesRelayFromLanding(t *testing.T) {
+	p := NewPlatform("p1", "Test", nil, nil)
+	p.RelayNodeHash = makeHash(`{"type":"relay"}`) // configured relay is never a landing candidate
+	relayHash := p.RelayNodeHash
+	relayEntry := makeFullyRoutableEntry(relayHash, "sub1")
+	landingHash := makeHash(`{"type":"ss"}`)
+	landingEntry := makeFullyRoutableEntry(landingHash, "sub1")
+
+	// Chain mode: landing health comes from the relay chain state, not the node.
+	chainState := node.NewChainState(16)
+	stateIP := netip.MustParseAddr("5.6.7.8")
+	chainState.SetEgressIP(&stateIP)
+	chainState.LatencyTable.Update("example.com", 60*time.Millisecond, 10*time.Minute)
+	p.ChainStateResolver = func(_ node.Hash, landing node.Hash) *node.ChainState {
+		if landing == landingHash {
+			return chainState
+		}
+		return nil
+	}
+
+	p.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool) {
+		fn(relayHash, relayEntry)
+		fn(landingHash, landingEntry)
+	}, alwaysLookup, usGeoLookup)
+
+	if p.View().Contains(relayHash) {
+		t.Fatal("relay node must not be a routable landing candidate")
+	}
+	if !p.View().Contains(landingHash) {
+		t.Fatal("landing node should be routable when its chain state is healthy")
+	}
+}
+
+func TestPlatform_EvaluateNode_ChainModeRequiresChainState(t *testing.T) {
+	p := NewPlatform("p1", "Test", nil, nil)
+	p.RelayNodeHash = makeHash(`{"type":"relay"}`)
+	landingHash := makeHash(`{"type":"ss"}`)
+	landingEntry := makeFullyRoutableEntry(landingHash, "sub1")
+
+	// No chain state yet (probes through the relay have not run): not routable.
+	p.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool) {
+		fn(landingHash, landingEntry)
+	}, alwaysLookup, usGeoLookup)
+	if p.View().Size() != 0 {
+		t.Fatal("landing must not be routable without chain state")
+	}
+
+	// Chain state present but circuit-open: not routable.
+	state := node.NewChainState(16)
+	stateIP := netip.MustParseAddr("5.6.7.8")
+	state.SetEgressIP(&stateIP)
+	state.LatencyTable.Update("example.com", 60*time.Millisecond, 10*time.Minute)
+	state.CircuitOpenSince.Store(time.Now().UnixNano())
+	p.ChainStateResolver = func(_ node.Hash, _ node.Hash) *node.ChainState { return state }
+	p.FullRebuild(func(fn func(node.Hash, *node.NodeEntry) bool) {
+		fn(landingHash, landingEntry)
+	}, alwaysLookup, usGeoLookup)
+	if p.View().Size() != 0 {
+		t.Fatal("circuit-open chain state must not be routable")
+	}
+}

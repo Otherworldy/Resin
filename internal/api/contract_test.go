@@ -1987,3 +1987,39 @@ func TestAPIContract_BatchProbe(t *testing.T) {
 		t.Fatalf("empty hashes: got %d, want 400", rec.Code)
 	}
 }
+
+func TestAPIContract_PlatformRelayNodeHash(t *testing.T) {
+	srv, _, _ := newControlPlaneTestServer(t)
+
+	// Invalid relay hash → 400.
+	rec := doJSONRequest(t, srv, http.MethodPost, "/api/v1/platforms", map[string]any{
+		"name":            "relay-invalid",
+		"relay_node_hash": "not-a-hex",
+	}, true)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid relay create status: got %d, want %d, body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	assertErrorCode(t, rec, "INVALID_ARGUMENT")
+
+	// Unknown (well-formed but absent) relay hash → 400.
+	unknown := node.Hash{0xAA, 0xBB}.Hex()
+	rec = doJSONRequest(t, srv, http.MethodPost, "/api/v1/platforms", map[string]any{
+		"name":            "relay-unknown",
+		"relay_node_hash": unknown,
+	}, true)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unknown relay create status: got %d, want %d, body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	assertErrorCode(t, rec, "INVALID_ARGUMENT")
+
+	// Default platform response carries an empty relay_node_hash.
+	platformID := mustCreatePlatform(t, srv, "relay-default")
+	rec = doJSONRequest(t, srv, http.MethodGet, "/api/v1/platforms/"+platformID, nil, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get platform status: got %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	body := decodeJSONMap(t, rec)
+	if relay, _ := body["relay_node_hash"].(string); relay != "" {
+		t.Fatalf("default relay_node_hash: got %q, want empty", relay)
+	}
+}

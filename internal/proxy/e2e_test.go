@@ -1212,3 +1212,79 @@ func TestForwardProxy_CONNECTHalfTrafficNotMarkedZeroTraffic(t *testing.T) {
 	}
 	t.Fatal("expected RecordResult call for CONNECT half-traffic failure")
 }
+
+// proxyChainBuilder records BuildChained invocation for relay-path resolution.
+type proxyChainBuilder struct {
+	builds    int
+	lastTag   string
+	chainedOb *mockOutbound
+}
+
+func (b *proxyChainBuilder) Build(_ json.RawMessage) (adapter.Outbound, error) {
+	return &mockOutbound{}, nil
+}
+
+func (b *proxyChainBuilder) BuildChained(_ json.RawMessage, detourTag string) (adapter.Outbound, error) {
+	b.builds++
+	b.lastTag = detourTag
+	if b.chainedOb == nil {
+		b.chainedOb = &mockOutbound{}
+	}
+	return b.chainedOb, nil
+}
+
+func TestResolveRoutedOutbound_UsesChainWhenRelayConfigured(t *testing.T) {
+	env := newProxyE2EEnv(t)
+
+	// Add a relay node to the pool and configure it on the platform.
+	relayRaw := json.RawMessage(`{"type":"stub","server":"127.0.0.2","server_port":1}`)
+	relayHash := node.HashFromRawOptions(relayRaw)
+	if _, ok := env.pool.GetEntry(relayHash); !ok {
+		// Relay node must exist to be selectable; seed it directly.
+		relayEntry := node.NewNodeEntry(relayHash, relayRaw, time.Now(), 16)
+		ob := testutil.NewNoopOutbound()
+		relayEntry.Outbound.Store(&ob)
+		env.pool.LoadNodeFromBootstrap(relayEntry)
+	}
+
+	plat, _ := env.pool.GetPlatform("plat-id")
+	plat.RelayNodeHash = relayHash
+
+	builder := &proxyChainBuilder{}
+	chainMgr := outbound.NewOutboundManager(env.pool, builder)
+
+	routed, perr := resolveRoutedOutbound(env.router, env.pool, chainMgr, "plat", "", "example.com")
+	if perr != nil {
+		t.Fatalf("resolveRoutedOutbound: %v", perr)
+	}
+	if builder.builds != 1 {
+		t.Fatalf("BuildChained calls = %d, want 1", builder.builds)
+	}
+	if builder.lastTag != outbound.RelayTag(relayHash) {
+		t.Fatalf("detour tag = %q, want %q", builder.lastTag, outbound.RelayTag(relayHash))
+	}
+	if routed.Outbound != adapter.Outbound(builder.chainedOb) {
+		t.Fatal("expected chained outbound to be returned")
+	}
+	if routed.Route.RelayNodeHash != relayHash {
+		t.Fatalf("route relay hash = %s, want %s", routed.Route.RelayNodeHash.Hex(), relayHash.Hex())
+	}
+}
+
+func TestResolveRoutedOutbound_DirectWhenNoRelay(t *testing.T) {
+	env := newProxyE2EEnv(t)
+
+	builder := &proxyChainBuilder{}
+	chainMgr := outbound.NewOutboundManager(env.pool, builder)
+
+	routed, perr := resolveRoutedOutbound(env.router, env.pool, chainMgr, "plat", "", "example.com")
+	if perr != nil {
+		t.Fatalf("resolveRoutedOutbound: %v", perr)
+	}
+	if builder.builds != 0 {
+		t.Fatalf("BuildChained calls = %d, want 0 (direct route)", builder.builds)
+	}
+	if !routed.Route.RelayNodeHash.IsZero() {
+		t.Fatalf("direct route relay hash = %s, want zero", routed.Route.RelayNodeHash.Hex())
+	}
+}

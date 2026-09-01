@@ -30,7 +30,8 @@ const (
 	stateVersionPlatformRegexFilterRules         = 9
 	stateVersionAddProbeOverride                 = 10
 	stateVersionAddMaxNodeLatency                = 11
-	stateLatestVersion                           = stateVersionAddMaxNodeLatency
+	stateVersionAddRelayNodeHash                 = 12
+	stateLatestVersion                           = stateVersionAddRelayNodeHash
 	stateLegacyBaselineVersion                   = stateVersionAddFixedAccountHeader
 
 	stateBaseSchemaMigration = stateMigrationsPath + "/000001_state_base.up.sql"
@@ -126,12 +127,18 @@ func prepareLegacyStateBaseline(db *sql.DB, driver migratedb.Driver) error {
 	if err != nil {
 		return err
 	}
+	hasRelayNodeHash, err := hasTableColumn(db, "platforms", "relay_node_hash")
+	if err != nil {
+		return err
+	}
 	hasIncrementalAliveNodes, err := hasTableColumn(db, "subscriptions", "incremental_alive_nodes")
 	if err != nil {
 		return err
 	}
 
 	switch {
+	case hasEmptyBehavior && hasFixedHeader && hasIncrementalAliveNodes && hasPassiveCircuitBreakerDisabled && hasProbeOverride && hasMaxNodeLatency && hasRelayNodeHash:
+		return setLegacyMigrationVersion(db, driver, stateVersionAddRelayNodeHash)
 	case hasEmptyBehavior && hasFixedHeader && hasIncrementalAliveNodes && hasPassiveCircuitBreakerDisabled && hasProbeOverride && hasMaxNodeLatency:
 		return setLegacyMigrationVersion(db, driver, stateVersionAddMaxNodeLatency)
 	case hasEmptyBehavior && hasFixedHeader && hasIncrementalAliveNodes && hasPassiveCircuitBreakerDisabled && hasProbeOverride:

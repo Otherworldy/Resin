@@ -26,9 +26,12 @@ type Platform struct {
 	PassiveCircuitBreakerDisabled    bool   `json:"passive_circuit_breaker_disabled"`
 	// MaxNodeLatencyNs excludes nodes whose reference latency (authority-domain
 	// EWMA average) exceeds this threshold from routing. 0 = no limit.
-	MaxNodeLatencyNs int64                  `json:"max_node_latency_ns"`
-	ProbeOverride    *PlatformProbeOverride `json:"probe_override,omitempty"`
-	UpdatedAtNs      int64                  `json:"updated_at_ns"`
+	MaxNodeLatencyNs int64 `json:"max_node_latency_ns"`
+	// RelayNodeHash is the hex node hash of the platform's relay (中转) node.
+	// Empty means direct connection (no relay).
+	RelayNodeHash string                 `json:"relay_node_hash"`
+	ProbeOverride *PlatformProbeOverride `json:"probe_override,omitempty"`
+	UpdatedAtNs   int64                  `json:"updated_at_ns"`
 }
 
 // Subscription represents a node subscription source.

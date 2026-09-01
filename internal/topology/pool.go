@@ -50,6 +50,22 @@ type GlobalNodePool struct {
 	maxConsecutiveFailures func() int
 	latencyDecayWindow     func() time.Duration
 	latencyAuthorities     func() []string
+
+	// Chain probe states: relay→landing chains probed through each platform's
+	// relay. Never touches the node's direct global state.
+	chainStates *xsync.Map[chainKey, *node.ChainState]
+}
+
+// chainKey identifies one relay→landing chain.
+type chainKey struct {
+	relay   node.Hash
+	landing node.Hash
+}
+
+// RelayChainTarget describes one relay→landing chain probe target.
+type RelayChainTarget struct {
+	Relay   node.Hash
+	Landing node.Hash
 }
 
 // PoolConfig configures the GlobalNodePool.
@@ -96,6 +112,7 @@ func NewGlobalNodePool(cfg PoolConfig) *GlobalNodePool {
 		latencyAuthorities:     cfg.LatencyAuthorities,
 		platformByID:           make(map[string]*platform.Platform),
 		platformByName:         make(map[string]*platform.Platform),
+		chainStates:            xsync.NewMap[chainKey, *node.ChainState](),
 	}
 }
 
@@ -187,6 +204,9 @@ func (p *GlobalNodePool) RegisterPlatform(plat *platform.Platform) {
 		return
 	}
 	plat.LatencyAuthorities = p.latencyAuthorities
+	plat.ChainStateResolver = func(relay, landing node.Hash) *node.ChainState {
+		return p.ChainStateFor(relay, landing)
+	}
 	p.platformByID[plat.ID] = plat
 	if plat.Name != "" {
 		p.platformByName[plat.Name] = plat
@@ -220,6 +240,9 @@ func (p *GlobalNodePool) ReplacePlatform(next *platform.Platform) error {
 	}
 
 	next.LatencyAuthorities = p.latencyAuthorities
+	next.ChainStateResolver = func(relay, landing node.Hash) *node.ChainState {
+		return p.ChainStateFor(relay, landing)
+	}
 
 	// Build the new platform's view before publish so readers never observe
 	// an empty, not-yet-built view due only to replacement.
@@ -520,6 +543,170 @@ func (p *GlobalNodePool) RangeNodes(fn func(node.Hash, *node.NodeEntry) bool) {
 	p.nodes.Range(fn)
 }
 
+// ---------------------------------------------------------------------------
+// Relay chain states (中转链状态)
+// ---------------------------------------------------------------------------
+
+// ChainStateFor returns (creating on first use) the probe state for a
+// relay→landing chain.
+func (p *GlobalNodePool) ChainStateFor(relay, landing node.Hash) *node.ChainState {
+	key := chainKey{relay: relay, landing: landing}
+	state, _ := p.chainStates.LoadOrCompute(key, func() (*node.ChainState, bool) {
+		return node.NewChainState(p.maxLatencyTableEntries), false
+	})
+	return state
+}
+
+// RecordChainResult records a chain probe or passive health result.
+// On success, resets FailureCount and clears the chain circuit breaker.
+// On failure, increments FailureCount and opens the chain circuit at threshold.
+func (p *GlobalNodePool) RecordChainResult(relay, landing node.Hash, success bool) {
+	state := p.ChainStateFor(relay, landing)
+	if success {
+		state.FailureCount.Swap(0)
+		if state.CircuitOpenSince.Swap(0) != 0 {
+			p.notifyAllPlatformsDirty(landing)
+		}
+		return
+	}
+	newCount := state.FailureCount.Add(1)
+	maxFailures := p.currentMaxConsecutiveFailures()
+	if maxFailures > 0 && int(newCount) >= maxFailures {
+		if state.CircuitOpenSince.CompareAndSwap(0, time.Now().UnixNano()) {
+			p.notifyAllPlatformsDirty(landing)
+		}
+	}
+}
+
+// RecordChainLatency records a latency probe attempt for a chain.
+func (p *GlobalNodePool) RecordChainLatency(relay, landing node.Hash, rawTarget string, latency *time.Duration) {
+	state := p.ChainStateFor(relay, landing)
+	domain := netutil.ExtractDomain(rawTarget)
+	isAuthority := p.isAuthorityDomain(domain)
+	state.LastLatencyProbeAttempt.Store(time.Now().UnixNano())
+
+	if latency == nil || *latency <= 0 || state.LatencyTable == nil {
+		return
+	}
+	var decayWindow time.Duration
+	if p.latencyDecayWindow != nil {
+		decayWindow = p.latencyDecayWindow()
+	}
+	if decayWindow <= 0 {
+		decayWindow = 30 * time.Second // default
+	}
+	wasEmpty, _, _ := state.LatencyTable.UpdateClassified(domain, *latency, decayWindow, isAuthority)
+	if wasEmpty {
+		// Transitioned from empty to non-empty: the chain may now satisfy the
+		// HasLatency filter — notify platforms.
+		p.notifyAllPlatformsDirty(landing)
+	}
+}
+
+// SetChainEgressIP updates a chain's egress IP and optional region metadata
+// (same semantics as UpdateNodeEgressIP, scoped to the chain).
+func (p *GlobalNodePool) SetChainEgressIP(relay, landing node.Hash, ip *netip.Addr, loc *string) {
+	state := p.ChainStateFor(relay, landing)
+	nowNs := time.Now().UnixNano()
+
+	ipChanged := false
+	if ip != nil {
+		state.LastEgressUpdate.Store(nowNs)
+		if old := state.GetEgressIP(); old != *ip {
+			state.SetEgressIP(ip)
+			ipChanged = true
+		}
+	}
+
+	regionChanged := false
+	switch {
+	case loc != nil:
+		state.SetEgressRegion(loc)
+		regionChanged = state.GetEgressRegion() == *loc && loc != nil && *loc != ""
+	case ip == nil:
+		// Attempt-only update: keep region as-is.
+	case !ipChanged:
+		// IP unchanged and no explicit region: keep existing region.
+	default:
+		// IP changed without explicit region: clear stale region metadata.
+		state.SetEgressRegion(nil)
+		regionChanged = true
+	}
+
+	if ipChanged || regionChanged {
+		p.notifyAllPlatformsDirty(landing)
+	}
+}
+
+// ChainStateUpdated notifies platforms that a chain was re-probed.
+func (p *GlobalNodePool) ChainStateUpdated(_ node.Hash, landing node.Hash) {
+	p.notifyAllPlatformsDirty(landing)
+}
+
+// ChainEgressDue reports whether the chain is due for an egress probe.
+func (p *GlobalNodePool) ChainEgressDue(relay, landing node.Hash, maxInterval time.Duration) bool {
+	state, ok := p.chainStates.Load(chainKey{relay: relay, landing: landing})
+	if !ok {
+		return true
+	}
+	last := state.LastEgressUpdate.Load()
+	if last == 0 {
+		return true
+	}
+	return time.Since(time.Unix(0, last)) >= maxInterval
+}
+
+// ChainLatencyDue reports whether the chain is due for a latency probe.
+func (p *GlobalNodePool) ChainLatencyDue(relay, landing node.Hash, maxInterval time.Duration) bool {
+	state, ok := p.chainStates.Load(chainKey{relay: relay, landing: landing})
+	if !ok {
+		return true
+	}
+	last := state.LastLatencyProbeAttempt.Load()
+	if last == 0 {
+		return true
+	}
+	return time.Since(time.Unix(0, last)) >= maxInterval
+}
+
+// ClearChainStatesForNode drops all chain states touching the node (as relay
+// or landing). Called when the node is removed from the pool.
+func (p *GlobalNodePool) ClearChainStatesForNode(hash node.Hash) {
+	p.chainStates.DeleteMatching(func(key chainKey, _ *node.ChainState) (bool, bool) {
+		return key.relay == hash || key.landing == hash, false
+	})
+}
+
+// RelayChainTargets collects all relay→landing chain probe targets: every
+// platform-configured relay combined with the nodes matching that platform's
+// static filters (relay exclusion, disabled-by-subscription, tag regex).
+// Region is intentionally unchecked here: the chain's egress region is only
+// known after probing through the relay.
+func (p *GlobalNodePool) RelayChainTargets() []RelayChainTarget {
+	subLookup := p.MakeSubLookup()
+	seen := make(map[chainKey]struct{})
+	var out []RelayChainTarget
+	for _, plat := range p.platformSnapshot() {
+		if plat.RelayNodeHash.IsZero() {
+			continue
+		}
+		relay := plat.RelayNodeHash
+		p.nodes.Range(func(h node.Hash, entry *node.NodeEntry) bool {
+			if h == relay || !plat.MatchesFilters(h, entry, subLookup) {
+				return true
+			}
+			key := chainKey{relay: relay, landing: h}
+			if _, ok := seen[key]; ok {
+				return true
+			}
+			seen[key] = struct{}{}
+			out = append(out, RelayChainTarget{Relay: relay, Landing: h})
+			return true
+		})
+	}
+	return out
+}
+
 // RecordResult records a probe or passive health-check result.
 // On success, resets FailureCount and clears circuit-breaker.
 // On failure, increments FailureCount and opens circuit-breaker if threshold is reached.
@@ -566,7 +753,24 @@ func (p *GlobalNodePool) RecordResult(hash node.Hash, success bool) {
 // Failed passive traffic is ignored when the originating platform disables
 // passive circuit breaking; successes still count as positive health feedback.
 func (p *GlobalNodePool) RecordPassiveResult(platformID string, hash node.Hash, success bool) {
-	if success || !p.passiveCircuitBreakerDisabled(platformID) {
+	disabled := p.passiveCircuitBreakerDisabled(platformID)
+	var relay node.Hash
+	p.platMu.RLock()
+	if plat, ok := p.platformByID[platformID]; ok && plat != nil {
+		relay = plat.RelayNodeHash
+	}
+	p.platMu.RUnlock()
+
+	// Platforms with relay config record passive health on their chain state,
+	// keeping the node's direct global state untouched.
+	if !relay.IsZero() && relay != hash {
+		if success || !disabled {
+			p.RecordChainResult(relay, hash, success)
+		}
+		return
+	}
+
+	if success || !disabled {
 		p.RecordResult(hash, success)
 	}
 }
