@@ -4,8 +4,10 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Resinat/Resin/internal/model"
+	"github.com/Resinat/Resin/internal/node"
 )
 
 func TestBuildFromModel_Success(t *testing.T) {
@@ -244,5 +246,33 @@ func TestValidateRegionFilters_Invalid(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "region_filters[0]") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestBuildFromModel_RestoresRelayNodeHash(t *testing.T) {
+	relayHash := node.HashFromRawOptions([]byte(`{"type":"ss","server":"2.2.2.2","port":443}`))
+	mp := model.Platform{
+		ID: "p", Name: "P", StickyTTLNs: int64(30 * time.Minute),
+		RegexFilters: []string{}, RegionFilters: []string{},
+		ReverseProxyMissAction: "TREAT_AS_EMPTY", AllocationPolicy: "BALANCED",
+		RelayNodeHash: relayHash.Hex(),
+		UpdatedAtNs:   time.Now().UnixNano(),
+	}
+	plat, err := BuildFromModel(mp)
+	if err != nil {
+		t.Fatalf("BuildFromModel: %v", err)
+	}
+	if plat.RelayNodeHash != relayHash {
+		t.Fatalf("runtime relay hash: got %s, want %s", plat.RelayNodeHash.Hex(), relayHash.Hex())
+	}
+
+	// Empty model → zero relay (direct).
+	mp.RelayNodeHash = ""
+	plat, err = BuildFromModel(mp)
+	if err != nil {
+		t.Fatalf("BuildFromModel: %v", err)
+	}
+	if !plat.RelayNodeHash.IsZero() {
+		t.Fatalf("expected zero relay hash for empty model, got %s", plat.RelayNodeHash.Hex())
 	}
 }

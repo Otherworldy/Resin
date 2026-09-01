@@ -22,6 +22,8 @@ type ApiNodeSummary = Omit<NodeSummary, "tags"> & {
   last_latency_probe_attempt?: string | null;
   last_authority_latency_probe_attempt?: string | null;
   last_egress_update_attempt?: string | null;
+  relay_node_hash?: string | null;
+  relay_node_tag?: string | null;
 };
 
 function normalizeNode(raw: ApiNodeSummary): NodeSummary {
@@ -97,8 +99,9 @@ export async function getNode(hash: string): Promise<NodeSummary> {
   return normalizeNode(data);
 }
 
-export async function probeEgress(hash: string): Promise<EgressProbeResult> {
-  return apiRequest<EgressProbeResult>(`${basePath}/${hash}/actions/probe-egress`, {
+export async function probeEgress(hash: string, platformId?: string): Promise<EgressProbeResult> {
+  const query = platformId ? `?platform_id=${encodeURIComponent(platformId)}` : "";
+  return apiRequest<EgressProbeResult>(`${basePath}/${hash}/actions/probe-egress${query}`, {
     method: "POST",
   });
 }

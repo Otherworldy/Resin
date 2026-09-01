@@ -35,13 +35,17 @@ func (s *ControlPlaneService) ListNodes(filters NodeFilters) ([]NodeSummary, err
 		subLookup = s.Pool.MakeSubLookup()
 	}
 
-	// If platform_id filter, get the platform view.
+	// If platform_id filter, get the platform view. Relay platforms (中转)
+	// render chain state in summaries so the list reflects the platform's
+	// traffic path.
 	var platformView map[node.Hash]struct{}
+	var filterPlat *platform.Platform
 	if filters.PlatformID != nil {
 		plat, ok := s.Pool.GetPlatform(*filters.PlatformID)
 		if !ok {
 			return nil, notFound("platform not found")
 		}
+		filterPlat = plat
 		platformView = make(map[node.Hash]struct{}, plat.View().Size())
 		plat.View().Range(func(h node.Hash) bool {
 			platformView[h] = struct{}{}
@@ -70,7 +74,7 @@ func (s *ControlPlaneService) ListNodes(filters NodeFilters) ([]NodeSummary, err
 		if !s.nodeEntryMatchesFilters(entry, filters, subLookup) {
 			return
 		}
-		result = append(result, s.nodeEntryToSummary(h, entry))
+		result = append(result, s.nodeEntryToSummary(h, entry, filterPlat))
 	}
 
 	appendIfMatchedHash := func(h node.Hash) {
@@ -217,12 +221,12 @@ func (s *ControlPlaneService) GetNode(hashStr string) (*NodeSummary, error) {
 	if !ok {
 		return nil, notFound("node not found")
 	}
-	ns := s.nodeEntryToSummary(h, entry)
+	ns := s.nodeEntryToSummary(h, entry, nil)
 	return &ns, nil
 }
 
 // ProbeEgress triggers a synchronous egress probe and returns results.
-func (s *ControlPlaneService) ProbeEgress(hashStr string) (*probe.EgressProbeResult, error) {
+func (s *ControlPlaneService) ProbeEgress(hashStr string, platformID string) (*probe.EgressProbeResult, error) {
 	h, err := node.ParseHex(hashStr)
 	if err != nil {
 		return nil, invalidArg("node_hash: invalid format")
@@ -231,6 +235,14 @@ func (s *ControlPlaneService) ProbeEgress(hashStr string) (*probe.EgressProbeRes
 	if !ok {
 		return nil, notFound("node not found")
 	}
+
+	// Platform-pinned probe: when the platform configures a relay (中转) for
+	// this node, the probe rides the chain so users see the same path their
+	// traffic takes.
+	if relayHash, ok := s.platformRelayFor(platformID, h); ok {
+		return s.ProbeMgr.ProbeChainEgressSync(relayHash, h)
+	}
+
 	result, err := s.ProbeMgr.ProbeEgressSync(h)
 	if err != nil {
 		return nil, internal("egress probe failed", err)
@@ -240,6 +252,20 @@ func (s *ControlPlaneService) ProbeEgress(hashStr string) (*probe.EgressProbeRes
 		result.Region = entry.GetRegion(s.GeoIP.Lookup)
 	}
 	return result, nil
+}
+
+// platformRelayFor resolves the relay hash a platform configures for a node.
+// Returns ok=false when the platform has no relay or the node is the relay
+// itself (fall back to direct probing).
+func (s *ControlPlaneService) platformRelayFor(platformID string, h node.Hash) (node.Hash, bool) {
+	if platformID == "" {
+		return node.Zero, false
+	}
+	plat, ok := s.Pool.GetPlatform(platformID)
+	if !ok || plat == nil || plat.RelayNodeHash.IsZero() || plat.RelayNodeHash == h {
+		return node.Zero, false
+	}
+	return plat.RelayNodeHash, true
 }
 
 // ProbeLatency triggers a synchronous latency probe and returns results.
@@ -262,6 +288,16 @@ func (s *ControlPlaneService) ProbeLatency(hashStr string, platformID string) (*
 			testURL = plat.ProbeOverride.LatencyTestURL
 		}
 	}
+
+	// Platform-pinned relay: probe through the chain (same path as traffic).
+	if relayHash, ok := s.platformRelayFor(platformID, h); ok {
+		result, err := s.ProbeMgr.ProbeChainLatencySync(relayHash, h, testURL)
+		if err != nil {
+			return nil, internal("latency probe failed", err)
+		}
+		return result, nil
+	}
+
 	result, err := s.ProbeMgr.ProbeLatencySyncWithURL(h, testURL)
 	if err != nil {
 		return nil, internal("latency probe failed", err)
@@ -331,7 +367,7 @@ func (s *ControlPlaneService) BatchProbeLatency(hashes []string, platformID stri
 // BatchProbeEgress probes multiple nodes concurrently and returns per-node
 // results in input order.
 func (s *ControlPlaneService) BatchProbeEgress(hashes []string) ([]NodeProbeItem, error) {
-	return s.batchProbe(hashes, func(h string) (any, error) { return s.ProbeEgress(h) })
+	return s.batchProbe(hashes, func(h string) (any, error) { return s.ProbeEgress(h, "") })
 }
 
 func (s *ControlPlaneService) batchProbe(hashes []string, run func(string) (any, error)) ([]NodeProbeItem, error) {

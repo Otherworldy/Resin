@@ -388,7 +388,7 @@ export function NodesPage() {
   };
 
   const probeEgressMutation = useMutation({
-    mutationFn: async (hash: string) => probeEgress(hash),
+    mutationFn: async (hash: string) => probeEgress(hash, activeFilters.platform_id || undefined),
     onSuccess: async (result) => {
       await refreshNodes();
       showToast(
@@ -628,10 +628,19 @@ export function NodesPage() {
     col.accessor("egress_ip", {
       header: t("出口 IP"),
       cell: (info) => {
+        const node = info.row.original;
         const val = info.getValue() || "-";
         return (
           <div style={{ maxWidth: "100px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={val}>
             {val}
+            {node.relay_node_hash ? (
+              <span
+                className="relay-probe-badge"
+                title={t("经中转链探测：{{relay}}", { relay: node.relay_node_tag || node.relay_node_hash })}
+              >
+                ⤳{t("中转")}
+              </span>
+            ) : null}
           </div>
         );
       },

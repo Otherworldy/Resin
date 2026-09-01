@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"net/netip"
 	"sync/atomic"
 	"testing"
@@ -524,7 +525,7 @@ func TestProbeEgress_ReturnsRegion(t *testing.T) {
 		}),
 	}
 
-	got, err := cp.ProbeEgress(hash.Hex())
+	got, err := cp.ProbeEgress(hash.Hex(), "")
 	if err != nil {
 		t.Fatalf("ProbeEgress: %v", err)
 	}
@@ -533,5 +534,112 @@ func TestProbeEgress_ReturnsRegion(t *testing.T) {
 	}
 	if got.Region != "jp" {
 		t.Fatalf("region: got %q, want %q", got.Region, "jp")
+	}
+}
+
+func newRelayProbeService(t *testing.T) (*ControlPlaneService, *topology.GlobalNodePool, node.Hash, node.Hash) {
+	t.Helper()
+	subMgr := topology.NewSubscriptionManager()
+	pool := newNodeListTestPool(subMgr)
+	sub := subscription.NewSubscription("sub-relay", "sub-relay", "https://example.com/r", true, false)
+	subMgr.Register(sub)
+
+	landingHash := addRoutableNodeForSubscription(
+		t, pool, sub,
+		[]byte(`{"type":"ss","server":"1.1.1.1","port":443}`),
+		"203.0.113.60",
+	)
+	relayHash := node.HashFromRawOptions([]byte(`{"type":"ss","server":"2.2.2.2","port":443}`))
+	relayEntry := node.NewNodeEntry(relayHash, []byte(`{"type":"ss","server":"2.2.2.2","port":443}`), time.Now(), 16)
+	ob := testutil.NewNoopOutbound()
+	relayEntry.Outbound.Store(&ob)
+	pool.LoadNodeFromBootstrap(relayEntry)
+
+	plat := platform.NewPlatform("p-relay", "P", nil, nil)
+	plat.RelayNodeHash = relayHash
+	pool.RegisterPlatform(plat)
+	if err := pool.ReplacePlatform(plat); err != nil {
+		t.Fatal(err)
+	}
+
+	cp := &ControlPlaneService{
+		Pool:   pool,
+		SubMgr: subMgr,
+		ProbeMgr: probe.NewProbeManager(probe.ProbeConfig{
+			Pool: pool,
+			Fetcher: func(_ node.Hash, _ string) ([]byte, time.Duration, error) {
+				return []byte("ip=198.51.100.88\nloc=JP"), 20 * time.Millisecond, nil
+			},
+			RelayChainFetcher: func(_, _ node.Hash, _ string) ([]byte, time.Duration, error) {
+				return []byte("ip=9.9.9.9\nloc=SG"), 30 * time.Millisecond, nil
+			},
+			RelayChainRecorder: pool,
+		}),
+	}
+	return cp, pool, relayHash, landingHash
+}
+
+func TestProbeEgress_PlatformRelayRidesChain(t *testing.T) {
+	cp, pool, relayHash, landingHash := newRelayProbeService(t)
+
+	got, err := cp.ProbeEgress(landingHash.Hex(), "p-relay")
+	if err != nil {
+		t.Fatalf("ProbeEgress: %v", err)
+	}
+	// Chain fetcher returns a different IP than the direct fetcher: this proves
+	// the probe rode the relay chain.
+	if got.EgressIP != "9.9.9.9" {
+		t.Fatalf("egress_ip: got %q, want chain IP 9.9.9.9 (direct would be 198.51.100.88)", got.EgressIP)
+	}
+	// Chain state must be populated.
+	state := pool.ChainStateFor(relayHash, landingHash)
+	if state.GetEgressIP() != netip.MustParseAddr("9.9.9.9") {
+		t.Fatalf("chain egress ip: got %s", state.GetEgressIP())
+	}
+
+	// Without platform context the direct fetcher is used.
+	direct, err := cp.ProbeEgress(landingHash.Hex(), "")
+	if err != nil {
+		t.Fatalf("ProbeEgress direct: %v", err)
+	}
+	if direct.EgressIP != "198.51.100.88" {
+		t.Fatalf("direct egress_ip: got %q, want 198.51.100.88", direct.EgressIP)
+	}
+}
+
+func TestProbeLatency_PlatformRelayRidesChain(t *testing.T) {
+	cp, pool, relayHash, landingHash := newRelayProbeService(t)
+
+	got, err := cp.ProbeLatency(landingHash.Hex(), "p-relay")
+	if err != nil {
+		t.Fatalf("ProbeLatency: %v", err)
+	}
+	if got.TestURL == "" {
+		t.Fatal("expected test URL in result")
+	}
+	state := pool.ChainStateFor(relayHash, landingHash)
+	if !state.HasLatency() {
+		t.Fatal("expected chain latency to be recorded")
+	}
+	if state.LatencyTable.Size() == 0 {
+		t.Fatal("expected chain latency table populated")
+	}
+
+	// Latency probe failure must NOT open the chain circuit (measurement
+	// failure ≠ chain down). Use a failing chain fetcher.
+	cp2, pool2, _, _ := newRelayProbeService(t)
+	cp2.ProbeMgr = probe.NewProbeManager(probe.ProbeConfig{
+		Pool: pool2,
+		RelayChainFetcher: func(_, _ node.Hash, _ string) ([]byte, time.Duration, error) {
+			return nil, 0, context.DeadlineExceeded
+		},
+		RelayChainRecorder: pool2,
+	})
+	if _, err := cp2.ProbeLatency(landingHash.Hex(), "p-relay"); err == nil {
+		t.Fatal("expected latency probe failure")
+	}
+	chain2 := pool2.ChainStateFor(relayHash, landingHash)
+	if chain2.FailureCount.Load() != 0 || chain2.IsCircuitOpen() {
+		t.Fatalf("latency probe failure must not fail the chain, failures=%d", chain2.FailureCount.Load())
 	}
 }

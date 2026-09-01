@@ -16,6 +16,8 @@ type ChainState struct {
 	LastLatencyProbeAttempt atomic.Int64 // unix-nano, regardless of success
 	FailureCount            atomic.Int32
 	CircuitOpenSince        atomic.Int64 // unix-nano; 0 = not open
+	LastLatencyMs           atomic.Int64 // unix-nano of last successful latency observation
+	LastLatencyDomain       atomic.Value // string; domain of last successful latency observation
 	LatencyTable            *LatencyTable
 }
 

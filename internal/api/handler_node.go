@@ -212,10 +212,12 @@ func HandleGetNode(cp *service.ControlPlaneService) http.HandlerFunc {
 }
 
 // HandleProbeEgress returns a handler for POST /api/v1/nodes/{hash}/actions/probe-egress.
+// Optional query param platform_id pins the probe to that platform: when the
+// platform configures a relay (中转), the probe rides the relay chain.
 func HandleProbeEgress(cp *service.ControlPlaneService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		hash := PathParam(r, "hash")
-		result, err := cp.ProbeEgress(hash)
+		result, err := cp.ProbeEgress(hash, r.URL.Query().Get("platform_id"))
 		if err != nil {
 			writeServiceError(w, err)
 			return

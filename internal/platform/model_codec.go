@@ -134,7 +134,7 @@ func BuildFromModel(mp model.Platform) (*Platform, error) {
 		)
 	}
 
-	return NewConfiguredPlatform(
+	plat := NewConfiguredPlatform(
 		mp.ID,
 		mp.Name,
 		regexFilters,
@@ -147,7 +147,9 @@ func BuildFromModel(mp model.Platform) (*Platform, error) {
 		mp.PassiveCircuitBreakerDisabled,
 		mp.ProbeOverride,
 		mp.MaxNodeLatencyNs,
-	), nil
+	)
+	plat.RelayNodeHash = relayHashFromString(mp.RelayNodeHash)
+	return plat, nil
 }
 
 // relayHashFromString parses a persisted hex node hash; empty or invalid

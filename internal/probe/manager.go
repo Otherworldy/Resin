@@ -1021,6 +1021,98 @@ func (m *ProbeManager) performRelayEgressProbe(relay, landing node.Hash) {
 	m.relayChainRecorder.ChainStateUpdated(relay, landing)
 }
 
+// ProbeChainEgressSync performs a blocking egress probe through a relay→landing
+// chain (中转→落地), records it on the chain state, and returns the result.
+func (m *ProbeManager) ProbeChainEgressSync(relay, landing node.Hash) (*EgressProbeResult, error) {
+	if m.relayChainFetcher == nil || m.relayChainRecorder == nil {
+		return nil, fmt.Errorf("no relay chain probe configured")
+	}
+	select {
+	case <-m.stopCh:
+		return nil, fmt.Errorf("probe manager stopped")
+	default:
+	}
+	if m.onProbeEvent != nil {
+		m.onProbeEvent("egress")
+	}
+
+	body, latency, err := m.relayChainFetcher(relay, landing, egressTraceURL)
+	if err != nil {
+		m.relayChainRecorder.RecordChainResult(relay, landing, false)
+		m.relayChainRecorder.SetChainEgressIP(relay, landing, nil, nil)
+		return nil, fmt.Errorf("egress probe failed: %w", err)
+	}
+	m.relayChainRecorder.RecordChainResult(relay, landing, true)
+	if latency > 0 {
+		m.relayChainRecorder.RecordChainLatency(relay, landing, egressTraceDomain, &latency)
+	}
+	ip, loc, err := ParseCloudflareTrace(body)
+	if err != nil {
+		m.relayChainRecorder.SetChainEgressIP(relay, landing, nil, nil)
+		return nil, fmt.Errorf("parse egress IP: %w", err)
+	}
+	m.relayChainRecorder.SetChainEgressIP(relay, landing, &ip, loc)
+	m.relayChainRecorder.ChainStateUpdated(relay, landing)
+
+	return &EgressProbeResult{
+		EgressIP: ip.String(),
+		Region:   derefString(loc),
+		LatencyEwmaMs: latencyEwma(m.relayChainRecorder, relay, landing, egressTraceDomain),
+	}, nil
+}
+
+// ProbeChainLatencySync performs a blocking latency probe through a relay→landing
+// chain, records it on the chain state, and returns the result.
+func (m *ProbeManager) ProbeChainLatencySync(relay, landing node.Hash, testURL string) (*LatencyProbeResult, error) {
+	if m.relayChainFetcher == nil || m.relayChainRecorder == nil {
+		return nil, fmt.Errorf("no relay chain probe configured")
+	}
+	select {
+	case <-m.stopCh:
+		return nil, fmt.Errorf("probe manager stopped")
+	default:
+	}
+	if testURL == "" {
+		testURL = m.currentLatencyTestURL()
+	}
+	domain := netutil.ExtractDomain(testURL)
+	if m.onProbeEvent != nil {
+		m.onProbeEvent("latency")
+	}
+
+	_, latency, err := m.relayChainFetcher(relay, landing, testURL)
+	if err != nil {
+		m.relayChainRecorder.RecordChainLatency(relay, landing, domain, nil)
+		return nil, fmt.Errorf("latency probe failed: %w", err)
+	}
+	m.relayChainRecorder.RecordChainResult(relay, landing, true)
+	m.relayChainRecorder.RecordChainLatency(relay, landing, domain, &latency)
+	m.relayChainRecorder.ChainStateUpdated(relay, landing)
+
+	return &LatencyProbeResult{
+		LatencyEwmaMs: latencyEwma(m.relayChainRecorder, relay, landing, domain),
+		TestURL:       testURL,
+	}, nil
+}
+
+func latencyEwma(recorder RelayChainRecorder, relay, landing node.Hash, domain string) float64 {
+	if reader, ok := recorder.(interface {
+		ChainLatencyEWMA(relay, landing node.Hash, domain string) (float64, bool)
+	}); ok {
+		if ewmaMs, ok := reader.ChainLatencyEWMA(relay, landing, domain); ok {
+			return ewmaMs
+		}
+	}
+	return 0
+}
+
+func derefString(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
 // performRelayLatencyProbe probes latency through a relay→landing chain and
 // records it on the chain state.
 func (m *ProbeManager) performRelayLatencyProbe(relay, landing node.Hash) {
@@ -1035,7 +1127,8 @@ func (m *ProbeManager) performRelayLatencyProbe(relay, landing node.Hash) {
 	domain := netutil.ExtractDomain(testURL)
 	_, latency, err := m.relayChainFetcher(relay, landing, testURL)
 	if err != nil {
-		m.relayChainRecorder.RecordChainResult(relay, landing, false)
+		// A failed latency sample is a measurement failure, not proof the chain
+		// is down — record the attempt only, never a chain failure.
 		m.relayChainRecorder.RecordChainLatency(relay, landing, domain, nil)
 		log.Printf("[probe] relay chain latency probe failed for %s->%s: %v", relay.Hex(), landing.Hex(), err)
 		return

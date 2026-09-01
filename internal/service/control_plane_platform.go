@@ -792,6 +792,12 @@ type NodeSummary struct {
 	LastProbeLatencyMs               *float64  `json:"last_probe_latency_ms,omitempty"`
 	LastProbeLatencyDomain           string    `json:"last_probe_latency_domain,omitempty"`
 	Tags                             []NodeTag `json:"tags"`
+
+	// Platform-view chain state (中转链): when the list is scoped to a
+	// platform that configures a relay, health fields above reflect the
+	// relay→landing chain state and these mark its source.
+	RelayNodeHash string `json:"relay_node_hash,omitempty"`
+	RelayNodeTag  string `json:"relay_node_tag,omitempty"`
 }
 
 // IsHealthyAndEnabled follows the node-summary health rule used by API/UI
@@ -807,7 +813,15 @@ type NodeTag struct {
 	SubscriptionCreatedAtNs int64  `json:"-"`
 }
 
-func (s *ControlPlaneService) nodeEntryToSummary(h node.Hash, entry *node.NodeEntry) NodeSummary {
+func (s *ControlPlaneService) nodeEntryToSummary(h node.Hash, entry *node.NodeEntry, plat *platform.Platform) NodeSummary {
+	// Platform-scoped relay view: health fields come from the chain state so
+	// the list reflects the same path as the platform's traffic.
+	if plat != nil && !plat.RelayNodeHash.IsZero() && plat.ChainStateResolver != nil {
+		if state := plat.ChainStateResolver(plat.RelayNodeHash, h); state != nil {
+			return s.chainNodeToSummary(h, entry, plat, state)
+		}
+	}
+
 	ns := NodeSummary{
 		NodeHash:     h.Hex(),
 		CreatedAt:    entry.CreatedAt.UTC().Format(time.RFC3339Nano),
@@ -888,6 +902,98 @@ func (s *ControlPlaneService) nodeEntryToSummary(h node.Hash, entry *node.NodeEn
 	return ns
 }
 
+// chainNodeToSummary renders a node summary from its relay chain state
+// (platform-scoped view): egress IP, region, latency and circuit status all
+// come from the relay→landing chain, so the list shows the same path the
+// platform's traffic takes. RelayNodeHash/RelayNodeTag mark the source.
+func (s *ControlPlaneService) chainNodeToSummary(
+	h node.Hash,
+	entry *node.NodeEntry,
+	plat *platform.Platform,
+	state *node.ChainState,
+) NodeSummary {
+	ns := NodeSummary{
+		NodeHash:     h.Hex(),
+		CreatedAt:    entry.CreatedAt.UTC().Format(time.RFC3339Nano),
+		Enabled:      true,
+		HasOutbound:  entry.HasOutbound(),
+		LastError:    entry.GetLastError(),
+		FailureCount: int(state.FailureCount.Load()),
+	}
+
+	if s != nil && s.Pool != nil {
+		ns.Enabled = !s.Pool.IsNodeDisabled(h)
+		ns.DisplayTag = s.Pool.ResolveNodeDisplayTag(h)
+		ns.RelayNodeHash = plat.RelayNodeHash.Hex()
+		if tag := s.Pool.ResolveNodeDisplayTag(plat.RelayNodeHash); tag != "" {
+			ns.RelayNodeTag = tag
+		}
+	}
+
+	if cos := state.CircuitOpenSince.Load(); cos > 0 {
+		t := time.Unix(0, cos).UTC().Format(time.RFC3339Nano)
+		ns.CircuitOpenSince = &t
+	}
+
+	if ip := state.GetEgressIP(); ip.IsValid() {
+		ns.EgressIP = ip.String()
+		ns.Region = state.GetEgressRegion()
+	}
+	if leu := state.LastEgressUpdate.Load(); leu > 0 {
+		ns.LastEgressUpdate = time.Unix(0, leu).UTC().Format(time.RFC3339Nano)
+	}
+	if lastAny := state.LastLatencyProbeAttempt.Load(); lastAny > 0 {
+		ns.LastLatencyProbeAttempt = time.Unix(0, lastAny).UTC().Format(time.RFC3339Nano)
+	}
+	if s != nil && s.RuntimeCfg != nil {
+		if cfg := s.RuntimeCfg.Load(); cfg != nil {
+			if avgMs, ok := node.AverageEWMAForTableMs(state.LatencyTable, cfg.LatencyAuthorities); ok {
+				ns.ReferenceLatencyMs = &avgMs
+			}
+		}
+	}
+	if lastMs := state.LastLatencyMs.Load(); lastMs > 0 {
+		lms := float64(lastMs) / float64(time.Millisecond)
+		ns.LastProbeLatencyMs = &lms
+		ns.LastProbeLatencyDomain = state.LastLatencyDomain.Load().(string)
+	}
+
+	ns.Tags = s.nodeSummaryTags(h, entry)
+	return ns
+}
+
+// nodeSummaryTags builds the subscription tag list shared by direct and
+// chain views.
+func (s *ControlPlaneService) nodeSummaryTags(h node.Hash, entry *node.NodeEntry) []NodeTag {
+	var tags []NodeTag
+	subIDs := entry.SubscriptionIDs()
+	for _, subID := range subIDs {
+		if s == nil || s.SubMgr == nil {
+			break
+		}
+		sub := s.SubMgr.Lookup(subID)
+		if sub == nil {
+			continue
+		}
+		managed, ok := sub.ManagedNodes().LoadNode(h)
+		if !ok {
+			continue
+		}
+		for _, tag := range managed.Tags {
+			tags = append(tags, NodeTag{
+				SubscriptionID:          subID,
+				SubscriptionName:        sub.Name(),
+				Tag:                     sub.Name() + "/" + tag,
+				SubscriptionCreatedAtNs: sub.CreatedAtNs,
+			})
+		}
+	}
+	if tags == nil {
+		tags = []NodeTag{}
+	}
+	return tags
+}
+
 // PreviewFilter returns nodes matching the given filter spec.
 func (s *ControlPlaneService) PreviewFilter(req PreviewFilterRequest) ([]NodeSummary, error) {
 	hasPlatformID := req.PlatformID != nil && *req.PlatformID != ""
@@ -899,12 +1005,14 @@ func (s *ControlPlaneService) PreviewFilter(req PreviewFilterRequest) ([]NodeSum
 
 	var regexFilters node.TagFilter
 	var regionFilters []string
+	var filterPlat *platform.Platform
 
 	if hasPlatformID {
 		plat, ok := s.Pool.GetPlatform(*req.PlatformID)
 		if !ok {
 			return nil, notFound("platform not found")
 		}
+		filterPlat = plat
 		regexFilters = plat.RegexFilters
 		regionFilters = plat.RegionFilters
 	} else {
@@ -937,7 +1045,7 @@ func (s *ControlPlaneService) PreviewFilter(req PreviewFilterRequest) ([]NodeSum
 				return true
 			}
 		}
-		result = append(result, s.nodeEntryToSummary(h, entry))
+		result = append(result, s.nodeEntryToSummary(h, entry, filterPlat))
 		return true
 	})
 	return result, nil

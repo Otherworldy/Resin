@@ -588,6 +588,8 @@ func (p *GlobalNodePool) RecordChainLatency(relay, landing node.Hash, rawTarget 
 	if latency == nil || *latency <= 0 || state.LatencyTable == nil {
 		return
 	}
+	state.LastLatencyMs.Store(int64(*latency))
+	state.LastLatencyDomain.Store(domain)
 	var decayWindow time.Duration
 	if p.latencyDecayWindow != nil {
 		decayWindow = p.latencyDecayWindow()
@@ -621,8 +623,9 @@ func (p *GlobalNodePool) SetChainEgressIP(relay, landing node.Hash, ip *netip.Ad
 	regionChanged := false
 	switch {
 	case loc != nil:
+		oldRegion := state.GetEgressRegion()
 		state.SetEgressRegion(loc)
-		regionChanged = state.GetEgressRegion() == *loc && loc != nil && *loc != ""
+		regionChanged = oldRegion != state.GetEgressRegion()
 	case ip == nil:
 		// Attempt-only update: keep region as-is.
 	case !ipChanged:
@@ -667,6 +670,19 @@ func (p *GlobalNodePool) ChainLatencyDue(relay, landing node.Hash, maxInterval t
 		return true
 	}
 	return time.Since(time.Unix(0, last)) >= maxInterval
+}
+
+// ChainLatencyEWMA returns the chain's EWMA (milliseconds) for a domain.
+func (p *GlobalNodePool) ChainLatencyEWMA(relay, landing node.Hash, domain string) (float64, bool) {
+	state, ok := p.chainStates.Load(chainKey{relay: relay, landing: landing})
+	if !ok || state == nil || state.LatencyTable == nil {
+		return 0, false
+	}
+	stats, ok := state.LatencyTable.GetDomainStats(domain)
+	if !ok {
+		return 0, false
+	}
+	return float64(stats.Ewma.Milliseconds()), true
 }
 
 // ClearChainStatesForNode drops all chain states touching the node (as relay

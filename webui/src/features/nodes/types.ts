@@ -23,6 +23,9 @@ export type NodeSummary = {
   last_probe_latency_ms?: number;
   last_probe_latency_domain?: string;
   tags: NodeTag[];
+  // 平台视角（中转链）：非空时健康字段来自该中转链探测。
+  relay_node_hash?: string;
+  relay_node_tag?: string;
 };
 
 export type PageResponse<T> = {
