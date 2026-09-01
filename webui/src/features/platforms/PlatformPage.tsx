@@ -2,7 +2,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, Info, Plus, RefreshCw, Search, Sparkles, X } from "lucide-react";
 import { useState } from "react";
-import { useForm } from "react-hook-form";
+import { Controller, useForm } from "react-hook-form";
 import { useNavigate } from "react-router-dom";
 import { Badge } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
@@ -18,7 +18,7 @@ import { useI18n } from "../../i18n";
 import { formatApiErrorMessage } from "../../lib/error-message";
 import { formatGoDuration, formatRelativeTime } from "../../lib/time";
 import { createPlatform, listPlatforms } from "./api";
-import { listNodes } from "../nodes/api";
+import { RelayNodeSelect } from "./RelayNodeSelect";
 import { ProbeOverrideFields } from "./ProbeOverrideFields";
 import {
   allocationPolicies,
@@ -82,13 +82,6 @@ export function PlatformPage() {
     defaultValues: defaultPlatformFormValues,
   });
   const createEmptyAccountBehavior = createForm.watch("reverse_proxy_empty_account_behavior");
-
-  const relayNodesQuery = useQuery({
-    queryKey: ["nodes", "relay-options"],
-    queryFn: () => listNodes({ has_outbound: true, enabled: true, limit: 500, sort_by: "tag" }),
-    staleTime: 60_000,
-  });
-  const relayNodes = relayNodesQuery.data?.items ?? [];
 
   const createMutation = useMutation({
     mutationFn: createPlatform,
@@ -289,14 +282,17 @@ export function PlatformPage() {
                 <label className="field-label" htmlFor="create-relay">
                   {t("中转节点（可选）")}
                 </label>
-                <Select id="create-relay" {...createForm.register("relay_node_hash")}>
-                  <option value="">{t("直连（不使用中转节点）")}</option>
-                  {relayNodes.map((item) => (
-                    <option key={item.node_hash} value={item.node_hash}>
-                      {item.display_tag || item.node_hash}
-                    </option>
-                  ))}
-                </Select>
+                <Controller
+                  control={createForm.control}
+                  name="relay_node_hash"
+                  render={({ field }) => (
+                    <RelayNodeSelect
+                      value={field.value}
+                      onChange={(hash) => field.onChange(hash)}
+                      invalid={!!createForm.formState.errors.relay_node_hash}
+                    />
+                  )}
+                />
                 <p className="muted" style={{ marginTop: 4, fontSize: 12 }}>
                   {t("选中后，此平台的代理流量将先经中转节点、再由路由选中的落地节点出站；留空表示直连（不经过中转）。")}
                 </p>

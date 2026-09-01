@@ -3546,3 +3546,70 @@ a {
     transform: translateY(-20px) scale(0.92);
   }
 }
+
+/* Relay node searchable select (platform relay picker) */
+.relay-select {
+  position: relative;
+}
+.relay-select-options {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 30;
+  max-height: 280px;
+  overflow-y: auto;
+  background: var(--bg-card, #fff);
+  border: 1px solid var(--border, rgba(0, 0, 0, 0.12));
+  border-radius: 8px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.12);
+  padding: 4px;
+}
+.relay-select-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.relay-select-option:hover {
+  background: var(--bg-muted, rgba(127, 127, 127, 0.1));
+}
+.relay-select-option-active {
+  background: var(--accent-soft, rgba(59, 130, 246, 0.12));
+}
+.relay-select-option-tag {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.relay-select-option-meta {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.relay-select-option-latency {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.relay-select-option-hash {
+  font-family: monospace;
+  font-size: 11px;
+  color: var(--text-secondary, #6b7280);
+}
+.relay-select-empty {
+  padding: 10px 8px;
+  text-align: center;
+  color: var(--text-secondary, #6b7280);
+  font-size: 12px;
+}
