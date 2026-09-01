@@ -45,25 +45,19 @@ function formatLatency(latencyMs: number | null): string {
 }
 
 /**
- * Searchable node picker for the platform relay (中转节点) field.
+ * Node picker for the platform relay (中转节点) field.
  *
- * Node pools can be large, so the option list is fetched from the server with
- * a debounced tag-keyword search instead of loading every node up front:
- * - empty query: first 50 enabled nodes with an outbound, sorted by tag
- * - keyword: server-side fuzzy match on the node display tag
- * - the currently selected node is resolved on demand via GET /nodes/{hash}
+ * Loads the FULL candidate set (enabled nodes with an outbound) up front and
+ * filters locally as the user types, so every relay candidate is visible
+ * without narrowing first. Candidate count above the fetch ceiling would
+ * need server-side paging again. The currently selected node that fell out
+ * of the candidate set is resolved on demand via GET /nodes/{hash}.
  */
 export function RelayNodeSelect({ value, onChange, invalid }: RelayNodeSelectProps) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const [keyword, setKeyword] = useState("");
-  const [debounced, setDebounced] = useState("");
   const wrapRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    const timer = setTimeout(() => setDebounced(keyword.trim()), 300);
-    return () => clearTimeout(timer);
-  }, [keyword]);
 
   useEffect(() => {
     const onDown = (event: MouseEvent) => {
@@ -76,18 +70,32 @@ export function RelayNodeSelect({ value, onChange, invalid }: RelayNodeSelectPro
     return () => document.removeEventListener("mousedown", onDown);
   }, []);
 
+  // ponytail: full candidate fetch, ceiling 10000 (server max is 100000);
+  // if a deployment ever exceeds this, page the server search again.
   const optionsQuery = useQuery({
-    queryKey: ["nodes", "relay-options", debounced],
+    queryKey: ["nodes", "relay-options-all"],
     queryFn: () =>
       listNodes({
-        tag_keyword: debounced || undefined,
         has_outbound: true,
         enabled: true,
-        limit: 50,
+        limit: 10000,
         sort_by: "tag",
       }),
     staleTime: 30_000,
   });
+
+  const filteredOptions = useMemo(() => {
+    const items = optionsQuery.data?.items ?? [];
+    const kw = keyword.trim().toLowerCase();
+    if (!kw) {
+      return items;
+    }
+    return items.filter(
+      (item) =>
+        (item.display_tag || item.node_hash).toLowerCase().includes(kw) ||
+        item.node_hash.toLowerCase().includes(kw),
+    );
+  }, [optionsQuery.data, keyword]);
 
   // Resolve the current selection's display tag when it isn't in the options.
   const selectedQuery = useQuery({
@@ -142,7 +150,7 @@ export function RelayNodeSelect({ value, onChange, invalid }: RelayNodeSelectPro
           >
             {t("直连（不使用中转节点）")}
           </button>
-          {(optionsQuery.data?.items ?? []).map((item) => (
+          {filteredOptions.map((item) => (
             <button
               key={item.node_hash}
               type="button"
@@ -163,7 +171,7 @@ export function RelayNodeSelect({ value, onChange, invalid }: RelayNodeSelectPro
               </span>
             </button>
           ))}
-          {optionsQuery.data && optionsQuery.data.items.length === 0 ? (
+          {optionsQuery.data && filteredOptions.length === 0 ? (
             <div className="relay-select-empty">{t("无匹配节点")}</div>
           ) : null}
         </div>
