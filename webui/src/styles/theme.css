@@ -3547,6 +3547,20 @@ a {
   }
 }
 
+/* 经中转探测 标注（节点详情） */
+.relay-probe-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 4px;
+  font-size: 11px;
+  line-height: 18px;
+  font-weight: 500;
+  color: var(--text-secondary, #6b7280);
+  background: var(--bg-muted, rgba(127, 127, 127, 0.12));
+  white-space: nowrap;
+}
+
 /* Relay node searchable select (platform relay picker) */
 .relay-select {
   position: relative;

@@ -212,7 +212,7 @@ func (s *ControlPlaneService) nodeEntryMatchesFilters(
 }
 
 // GetNode returns a single node by hash.
-func (s *ControlPlaneService) GetNode(hashStr string) (*NodeSummary, error) {
+func (s *ControlPlaneService) GetNode(hashStr string, platformID string) (*NodeSummary, error) {
 	h, err := node.ParseHex(hashStr)
 	if err != nil {
 		return nil, invalidArg("node_hash: invalid format")
@@ -221,7 +221,13 @@ func (s *ControlPlaneService) GetNode(hashStr string) (*NodeSummary, error) {
 	if !ok {
 		return nil, notFound("node not found")
 	}
-	ns := s.nodeEntryToSummary(h, entry, nil)
+	// Platform-scoped view: relay platforms render chain state so the
+	// detail matches the list and the traffic path the user is inspecting.
+	var plat *platform.Platform
+	if platformID != "" && s.Pool != nil {
+		plat, _ = s.Pool.GetPlatform(platformID)
+	}
+	ns := s.nodeEntryToSummary(h, entry, plat)
 	return &ns, nil
 }
 

@@ -94,8 +94,9 @@ export async function listNodes(filters: NodeListQuery): Promise<PageResponse<No
   };
 }
 
-export async function getNode(hash: string): Promise<NodeSummary> {
-  const data = await apiRequest<ApiNodeSummary>(`${basePath}/${hash}`);
+export async function getNode(hash: string, platformId?: string): Promise<NodeSummary> {
+  const query = platformId ? `?platform_id=${encodeURIComponent(platformId)}` : "";
+  const data = await apiRequest<ApiNodeSummary>(`${basePath}/${hash}${query}`);
   return normalizeNode(data);
 }
 

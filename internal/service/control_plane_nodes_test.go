@@ -231,7 +231,7 @@ func TestGetNode_TagIncludesSubscriptionNamePrefix(t *testing.T) {
 		GeoIP:  &geoip.Service{},
 	}
 
-	got, err := cp.GetNode(hash.Hex())
+	got, err := cp.GetNode(hash.Hex(), "")
 	if err != nil {
 		t.Fatalf("GetNode: %v", err)
 	}
@@ -290,7 +290,7 @@ func TestGetNode_ReferenceLatencyMsUsesAuthorityAverage(t *testing.T) {
 		RuntimeCfg: runtimeCfg,
 	}
 
-	got, err := cp.GetNode(hash.Hex())
+	got, err := cp.GetNode(hash.Hex(), "")
 	if err != nil {
 		t.Fatalf("GetNode: %v", err)
 	}
@@ -440,7 +440,7 @@ func TestListNodes_RegionFilterAndSummaryPreferStoredRegion(t *testing.T) {
 		t.Fatalf("region-filtered nodes = %+v, want [%s]", nodes, hash.Hex())
 	}
 
-	got, err := cp.GetNode(hash.Hex())
+	got, err := cp.GetNode(hash.Hex(), "")
 	if err != nil {
 		t.Fatalf("GetNode: %v", err)
 	}

@@ -349,9 +349,10 @@ export function NodesPage() {
 
   const selectedHash = selectedNode?.node_hash || "";
 
+  const detailPlatformId = activeFilters.platform_id || undefined;
   const nodeDetailQuery = useQuery({
-    queryKey: ["node", selectedHash],
-    queryFn: () => getNode(selectedHash),
+    queryKey: ["node", selectedHash, detailPlatformId],
+    queryFn: () => getNode(selectedHash, detailPlatformId),
     enabled: Boolean(selectedHash) && drawerOpen,
     refetchInterval: 30_000,
   });
@@ -1038,6 +1039,14 @@ export function NodesPage() {
                     <span>{t("出口 / 区域")}</span>
                     <p>
                       {detailNode.egress_ip || "-"} / {regionToFlag(detailNode.region)}
+                      {detailNode.relay_node_hash ? (
+                        <span
+                          className="relay-probe-badge"
+                          title={t("经中转链探测：{{relay}}", { relay: detailNode.relay_node_tag || detailNode.relay_node_hash })}
+                        >
+                          {t("经中转")}
+                        </span>
+                      ) : null}
                     </p>
                   </div>
                   <div>

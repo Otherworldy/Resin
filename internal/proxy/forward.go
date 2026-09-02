@@ -327,11 +327,12 @@ func (p *ForwardProxy) handleCONNECT(w http.ResponseWriter, r *http.Request) {
 	defer lifecycle.finish()
 	lifecycle.setAccount(account)
 
-	prepare := prepareConnectTunnel(
+		prepare := prepareConnectTunnel(
 		r.Context(),
 		tunnelDeps{
 			router:      p.router,
 			pool:        p.pool,
+			chains:      p.chains,
 			health:      p.health,
 			metricsSink: p.metricsSink,
 			bypass:      p.bypass,

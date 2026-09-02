@@ -202,7 +202,7 @@ func HandleListNodes(cp *service.ControlPlaneService) http.HandlerFunc {
 func HandleGetNode(cp *service.ControlPlaneService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		hash := PathParam(r, "hash")
-		n, err := cp.GetNode(hash)
+		n, err := cp.GetNode(hash, r.URL.Query().Get("platform_id"))
 		if err != nil {
 			writeServiceError(w, err)
 			return
