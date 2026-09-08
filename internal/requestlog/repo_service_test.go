@@ -682,3 +682,76 @@ func TestRepo_InsertBatchWithoutOpenReturnsNoActiveDB(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestRepo_OpenReadOnlyRejectsWrites(t *testing.T) {
+	repo := NewRepo(t.TempDir(), 1<<20, 2)
+	if err := repo.Open(); err != nil {
+		t.Fatalf("repo.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = repo.Close() })
+
+	if _, err := repo.InsertBatch([]proxy.RequestLogEntry{{
+		ID:          "ro-1",
+		StartedAtNs: time.Now().UnixNano(),
+		ProxyType:   proxy.ProxyTypeForward,
+	}}); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	db, err := repo.openReadOnly(repo.activePath)
+	if err != nil {
+		t.Fatalf("openReadOnly: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	if _, err := db.Exec("INSERT INTO request_logs(id, ts_ns, proxy_type) VALUES('x', 1, 1)"); err == nil {
+		t.Fatal("expected read-only open to reject writes")
+	}
+}
+
+func TestRepo_ListDuringConcurrentInserts(t *testing.T) {
+	repo := NewRepo(t.TempDir(), 1<<20, 2)
+	if err := repo.Open(); err != nil {
+		t.Fatalf("repo.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = repo.Close() })
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 50; i++ {
+			_, _ = repo.InsertBatch([]proxy.RequestLogEntry{{
+				ID:          fmt.Sprintf("c-%d", i),
+				StartedAtNs: time.Now().UnixNano(),
+				ProxyType:   proxy.ProxyTypeForward,
+				NetOK:       true,
+			}})
+		}
+	}()
+
+	saw := 0
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		rows, _, _, err := repo.List(ListFilter{Limit: 10})
+		if err != nil {
+			t.Fatalf("list: %v", err)
+		}
+		if len(rows) > saw {
+			saw = len(rows)
+		}
+		if saw > 0 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	<-done
+	if saw == 0 {
+		rows, _, _, err := repo.List(ListFilter{Limit: 10})
+		if err != nil {
+			t.Fatalf("list after inserts: %v", err)
+		}
+		if len(rows) == 0 {
+			t.Fatal("list stayed empty during concurrent inserts")
+		}
+	}
+}

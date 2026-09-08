@@ -27,7 +27,8 @@ type Repo struct {
 	maxBytes    int64
 	retainCount int
 
-	// Active DB handle and path.
+	// Active DB handle and path. Guarded by activeMu.
+	activeMu   sync.RWMutex
 	activeDB   *sql.DB
 	activePath string
 
@@ -61,6 +62,9 @@ func (r *Repo) Open() error {
 		return fmt.Errorf("requestlog repo mkdir %s: %w", r.logDir, err)
 	}
 
+	r.activeMu.Lock()
+	defer r.activeMu.Unlock()
+
 	files, err := r.listDBFiles()
 	if err != nil {
 		return fmt.Errorf("requestlog repo open: %w", err)
@@ -84,6 +88,8 @@ func (r *Repo) Open() error {
 
 // Close closes the active DB.
 func (r *Repo) Close() error {
+	r.activeMu.Lock()
+	defer r.activeMu.Unlock()
 	if r.activeDB != nil {
 		err := r.activeDB.Close()
 		r.activeDB = nil
@@ -96,6 +102,8 @@ func (r *Repo) Close() error {
 // InsertBatch inserts a batch of log entries + optional payloads in a single
 // transaction. Returns the number of rows successfully inserted.
 func (r *Repo) InsertBatch(entries []proxy.RequestLogEntry) (int, error) {
+	r.activeMu.Lock()
+	defer r.activeMu.Unlock()
 	if r.activeDB == nil {
 		if err := r.recoverActiveDB(); err != nil {
 			return 0, err
@@ -277,22 +285,39 @@ type ListCursor struct {
 func (r *Repo) List(f ListFilter) ([]LogSummary, bool, *ListCursor, error) {
 	r.runReadBarrier()
 
-	files, err := r.listDBFiles()
-	if err != nil {
-		return nil, false, nil, err
-	}
-
 	limit := f.Limit
 	if limit <= 0 {
 		limit = 50
 	}
 	// Fetch one extra row across retained DBs to derive has_more.
 	fetchLimit := limit + 1
+
+	r.activeMu.RLock()
+	defer r.activeMu.RUnlock()
+
 	var results []LogSummary
-	// Iterate every retained DB, then globally merge-sort.
+	// Read the writer connection first so List sees the same WAL the
+	// flush loop is writing. A second connection used to miss rows when
+	// the shard was busy or opened with a non-URI DSN.
+	if r.activeDB != nil {
+		rows, err := r.queryLogs(r.activeDB, f, fetchLimit)
+		if err != nil {
+			return nil, false, nil, err
+		}
+		results = append(results, rows...)
+	}
+
+	files, err := r.listDBFiles()
+	if err != nil {
+		return nil, false, nil, err
+	}
+	// Iterate remaining retained DBs, then globally merge-sort.
 	// We must not early-stop by file order because request ts_ns can be out-of-order
 	// relative to DB filename time (e.g. long-lived requests flushed later).
 	for i := len(files) - 1; i >= 0; i-- {
+		if files[i] == r.activePath {
+			continue
+		}
 		db, err := r.openReadOnly(files[i])
 		if err != nil {
 			log.Printf("[requestlog] warning: list open db failed path=%q: %v", files[i], err)
@@ -337,13 +362,8 @@ func (r *Repo) List(f ListFilter) ([]LogSummary, bool, *ListCursor, error) {
 func (r *Repo) GetByID(id string) (*LogSummary, error) {
 	r.runReadBarrier()
 
-	files, err := r.listDBFiles()
-	if err != nil {
-		return nil, err
-	}
-
 	var result *LogSummary
-	r.queryAcrossRetainedDBs(files, "get_by_id", "id", id, func(db *sql.DB) (bool, error) {
+	r.queryAcrossRetainedDBs("get_by_id", "id", id, func(db *sql.DB) (bool, error) {
 		row, err := r.queryLogByID(db, id)
 		if err != nil {
 			return false, err
@@ -361,13 +381,8 @@ func (r *Repo) GetByID(id string) (*LogSummary, error) {
 func (r *Repo) GetPayloads(logID string) (*PayloadRow, error) {
 	r.runReadBarrier()
 
-	files, err := r.listDBFiles()
-	if err != nil {
-		return nil, err
-	}
-
 	var result *PayloadRow
-	r.queryAcrossRetainedDBs(files, "get_payloads", "log_id", logID, func(db *sql.DB) (bool, error) {
+	r.queryAcrossRetainedDBs("get_payloads", "log_id", logID, func(db *sql.DB) (bool, error) {
 		row, err := r.queryPayload(db, logID)
 		if err != nil {
 			return false, err
@@ -382,14 +397,33 @@ func (r *Repo) GetPayloads(logID string) (*PayloadRow, error) {
 }
 
 func (r *Repo) queryAcrossRetainedDBs(
-	files []string,
 	op string,
 	keyName string,
 	keyValue string,
 	query func(*sql.DB) (bool, error),
 ) {
+	r.activeMu.RLock()
+	defer r.activeMu.RUnlock()
+
+	if r.activeDB != nil {
+		stop, err := query(r.activeDB)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			log.Printf("[requestlog] warning: %s query failed path=%q %s=%q: %v", op, r.activePath, keyName, keyValue, err)
+		} else if err == nil && stop {
+			return
+		}
+	}
+
+	files, err := r.listDBFiles()
+	if err != nil {
+		log.Printf("[requestlog] warning: %s list db files failed %s=%q: %v", op, keyName, keyValue, err)
+		return
+	}
 	for i := len(files) - 1; i >= 0; i-- {
 		path := files[i]
+		if path == r.activePath {
+			continue
+		}
 		db, err := r.openReadOnly(path)
 		if err != nil {
 			log.Printf("[requestlog] warning: %s open db failed path=%q %s=%q: %v", op, path, keyName, keyValue, err)
@@ -534,7 +568,10 @@ func (r *Repo) listDBFiles() ([]string, error) {
 }
 
 func (r *Repo) openReadOnly(path string) (*sql.DB, error) {
-	dsn := path + "?mode=ro"
+	// file: URI is required for mode=ro. path?mode=ro is treated as a
+	// filename by SQLite and opened read-write (modernc strips the query
+	// and still uses SQLITE_OPEN_READWRITE|CREATE).
+	dsn := "file:" + filepath.ToSlash(path) + "?mode=ro&_pragma=busy_timeout(5000)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
