@@ -5,8 +5,7 @@ services:
       dockerfile: Dockerfile
       args:
         VERSION: local
-        # 无外网或访问不了 proxy.golang.org 时：GOPROXY=https://goproxy.cn,direct docker compose build
-        GOPROXY: ${GOPROXY:-}
+        GOPROXY: ${GOPROXY:-https://goproxy.cn,direct}
     image: resin:local
     container_name: resin
     restart: unless-stopped

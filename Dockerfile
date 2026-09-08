@@ -13,10 +13,10 @@ FROM golang:1.25-alpine AS go-builder
 WORKDIR /src
 
 COPY go.mod go.sum ./
-# GOPROXY is overridable via build arg for environments without access to
-# proxy.golang.org (e.g. GOPROXY=https://goproxy.cn,direct).
+# GOPROXY is overridable via build arg. Default goproxy.cn: proxy.golang.org
+# TLS timeouts do not fall through to the next GOPROXY entry.
 ARG GOPROXY
-RUN go env -w GOPROXY="${GOPROXY:-https://proxy.golang.org,direct}" && go mod download
+RUN go env -w GOPROXY="${GOPROXY:-https://goproxy.cn,direct}" && go mod download
 
 COPY . ./
 COPY --from=web-builder /src/webui/dist ./webui/dist
