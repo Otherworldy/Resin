@@ -9,8 +9,10 @@ RUN npm ci
 COPY webui/ ./
 RUN npm run build
 
-FROM golang:1.25-alpine AS go-builder
+FROM golang:1.26.10-alpine AS go-builder
 WORKDIR /src
+
+RUN apk add --no-cache git
 
 COPY go.mod go.sum ./
 # GOPROXY is overridable via build arg. Default goproxy.cn: proxy.golang.org
@@ -21,8 +23,8 @@ RUN go env -w GOPROXY="${GOPROXY:-https://goproxy.cn,direct}" && go mod download
 COPY . ./
 COPY --from=web-builder /src/webui/dist ./webui/dist
 
-ARG VERSION=dev
-ARG GIT_COMMIT=unknown
+ARG VERSION
+ARG GIT_COMMIT
 ARG BUILD_TIME=unknown
 
 RUN CGO_ENABLED=0 go build -trimpath -tags "with_quic with_wireguard with_grpc with_utls" \
